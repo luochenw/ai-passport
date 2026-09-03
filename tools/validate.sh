@@ -63,9 +63,15 @@ run_static_checks() {
     "${test_dir}/test_button_enum_sync"
     # 远程应用商店的逻辑(装 → 上首屏 → 商店不再列出 → 卸载)。这条链路的
     # 失败模式全是**静默**的:装了但清单没推出去、卸了设备首屏还留着、装到
-    # 第 9 个被悄悄丢掉 —— 真机上要一步步试才能发现。swiftc 只在 macOS 上有,
-    # Linux 的 CI 跳过这一项(那边的 static 档仍然跑其余全部检查)。
-    if command -v swiftc >/dev/null 2>&1; then
+    # 第 9 个被悄悄丢掉 —— 真机上要一步步试才能发现。
+    #
+    # ⚠ 判据是**平台**,不是"有没有 swiftc"。原来写的是 `command -v swiftc`,
+    # 注释里的理由是"swiftc 只在 macOS 上有" —— 这个前提不成立:GitHub 的
+    # Ubuntu runner 上有 swiftc,缺的是 SwiftUI(那是 Apple 平台独有的)。
+    # 于是 Linux CI 不但没跳过,还每次都在
+    #   RemoteApps.swift:2:8: error: no such module 'SwiftUI'
+    # 上挂掉。改成看 uname:Linux 上跳过,其余检查照跑。
+    if [[ "$(uname -s)" == "Darwin" ]] && command -v swiftc >/dev/null 2>&1; then
         # CodexApp + Protocol 也编进来:平台边界(本端跑不了的应用怎么表现)
         # 是这次三端改造的核心行为,而它的失败模式同样是静默的 —— 设备上
         # 点进去一片空白、或者"正在读取…"永远挂着。
@@ -132,7 +138,7 @@ run_static_checks() {
             mac-relay/FoloCodexRelay/Shared/Framework/AppConfigStore.swift
         HOME="${test_dir}" "${test_dir}/test_meal_client"
     else
-        echo "跳过 test_remote_apps:本机没有 swiftc"
+        echo "跳过 Swift 主机测试:非 macOS(SwiftUI 只在 Apple 平台上有)"
     fi
 
     python3 tests/test_verify_firmware.py
