@@ -100,7 +100,7 @@ This repo has a secret scanner (`tools/check_repo.py`), and community code here 
 
 **An app's own parameters (endpoint URLs, account credentials) belong to that app.** Don't spread them onto the companion app's **Config** tab — that page holds only settings that belong to the hardware itself (volume, brightness, Wi-Fi, status bar).
 
-`DashboardApp.swift` shows the pattern: read `~/.folotoy/dashboard.json` (`chmod 600`), and keep only a value-free description in the repo. Logs record **key names only, never values**.
+Recommended pattern: read `~/.folotoy/<app>.json` (`chmod 600`) and keep only a value-free description in the repo; put secrets in the keychain (see `WalkieClient` for a worked example). Logs record **key names only, never values**.
 
 ### 2.5 Background apps must not push
 
