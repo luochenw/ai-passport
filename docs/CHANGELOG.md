@@ -22,8 +22,8 @@
   configured server certificate and limiting the transport exception to that
   host. Dashboard network failures now report actionable URL error codes.
 
-- Added a fixed-location weekly meal application for Beijing Vanke Fashion
-  Center. It keeps weekly menu history, recommends a floor for lunch and dinner,
+- Added a weekly meal application (which restaurant it accepts is set by
+  `MEAL_BUILDING` at deploy time). It keeps weekly menu history, recommends a floor for lunch and dinner,
   and broadcasts weekday reminders at 12:10 and 18:10 only to clients that have
   installed the application.
 

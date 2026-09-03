@@ -262,16 +262,14 @@ final class MealClient {
         return components.url
     }
 
+    /// 配置文件名。跟应用 id 一致。
+    static let configID = "meal"
+
     private static func configuredServer(defaults: UserDefaults) -> String {
-        #if os(macOS)
-        let configPath = (NSHomeDirectory() as NSString)
-            .appendingPathComponent(".folotoy/meal.json")
-        if let data = FileManager.default.contents(atPath: configPath),
-           let config = try? JSONDecoder().decode(Config.self, from: data),
+        if let config = AppConfigStore.load(Config.self, for: configID),
            let url = mealEndpoint(from: config.server) {
             return url.absoluteString
         }
-        #endif
         if let url = Bundle.main.url(forResource: "meal", withExtension: "json"),
            let data = try? Data(contentsOf: url),
            let config = try? JSONDecoder().decode(Config.self, from: data),

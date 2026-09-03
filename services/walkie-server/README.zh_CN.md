@@ -31,7 +31,7 @@ macOS 上可安装为登录后自动运行的本地常驻服务：
 `GET /v1/meals/weeks` 读取历史；本机可通过
 `POST /v1/meals/remind?meal=lunch|dinner` 手动触发一次饭点提醒。
 
-餐厅固定为北京“时尚万科中心”（`MDBD00000590`）。抓取一周菜单 JSON 后可执行：
+餐厅由部署时的 `MEAL_BUILDING` 环境变量决定（不设则不校验，菜单文件里写什么就是什么）。抓取一周菜单 JSON 后可执行：
 
 ```bash
 python3 update-menu.py /path/to/week.json

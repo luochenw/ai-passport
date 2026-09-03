@@ -12,10 +12,14 @@ import (
 	"github.com/coder/websocket"
 )
 
+// 测试里用的楼名。是个假名字 —— 这是开源仓库,夹具里不该出现真实的
+// 办公楼。真实值由部署时的 MEAL_BUILDING 决定,见 mealBuildingName()。
+const wantBuilding = "示例大厦"
+
 func testMealWeek() mealWeek {
 	return mealWeek{
 		WeekOf:   "2026-08-31",
-		Building: "时尚万科中心",
+		Building: wantBuilding,
 		Days: []mealDay{{
 			Date: "2026-09-03",
 			Lunch: mealPeriod{Outlets: []mealOutlet{
@@ -48,11 +52,15 @@ func TestNormalizeMealWeekAndRecommendation(t *testing.T) {
 }
 
 func TestNormalizeMealWeekRejectsAnotherBuilding(t *testing.T) {
+	// 楼名校验默认是**关**的(不设 MEAL_BUILDING 就不校验,菜单文件写什么
+	// 是什么)—— 这样开源仓库里不用写死任何一栋真实的办公楼。
+	// 这条测的是"设了之后确实会挡",所以要显式设上。
+	t.Setenv("MEAL_BUILDING", wantBuilding)
 	week := testMealWeek()
 	week.Building = "其他楼宇"
 	now := time.Date(2026, 9, 3, 10, 0, 0, 0, time.FixedZone("CST", 8*60*60))
 	if err := normalizeMealWeek(&week, now.Location(), now); err == nil ||
-		!strings.Contains(err.Error(), mealBuildingName) {
+		!strings.Contains(err.Error(), wantBuilding) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

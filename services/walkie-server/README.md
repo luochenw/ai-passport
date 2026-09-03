@@ -34,8 +34,9 @@ uses `POST /v1/meals/update`; `GET /v1/meals/current` and
 `GET /v1/meals/weeks` expose the stored menu history. Local manual reminder
 checks use `POST /v1/meals/remind?meal=lunch|dinner`.
 
-The configured restaurant is Beijing Vanke Fashion Center
-(`MDBD00000590`). Submit a captured weekly JSON file with:
+Which restaurant this service accepts menus for is set by the `MEAL_BUILDING`
+environment variable at deploy time; leave it unset and no check is applied —
+whatever the menu file says is taken as-is. Submit a captured weekly JSON with:
 
 ```bash
 python3 update-menu.py /path/to/week.json

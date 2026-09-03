@@ -18,7 +18,9 @@ cp FoloCodexRelay/Info.plist "$APP/Contents/Info.plist"
 # 顶层已经没有源码了 —— 入口是 Shared/RelayApp.swift 的 @main。
 #
 # iOS 构建只需要去掉 macOS/ 这一组(见 mac-relay/project.yml)。
-SOURCES=$(ls FoloCodexRelay/Shared/*.swift FoloCodexRelay/macOS/*.swift)
+# 递归收集:源码按「框架 / 能力 / 每个应用一个文件夹」分层放,不是平铺。
+# 用 find 而不是 ls glob —— 加一个应用就是新建一个文件夹,构建脚本不用改。
+SOURCES=$(find FoloCodexRelay/Shared FoloCodexRelay/macOS -name '*.swift' | sort)
 # 不再链接 AppKit:入口已经从 NSApplication/NSWindow 换成 SwiftUI 的
 # @main App + WindowGroup,全工程一处 AppKit 都不用了。
 swiftc $SOURCES \
@@ -35,19 +37,32 @@ swiftc $SOURCES \
 mkdir -p "$APP/Contents/Resources/AppCatalog"
 cp -R AppCatalog/. "$APP/Contents/Resources/AppCatalog/" 2>/dev/null || true
 
-# 应用自己的配置随构建打进 bundle。
+# 应用配置**默认不进构建产物**。
 #
-# 为什么要这一步:iOS 沙盒里没有家目录,`~/.folotoy/*.json` 那条路只在
-# macOS 上成立。bundle 两端都有,所以把配置在构建时拷进去,应用一行平台
-# 判断都不用写(见 DashboardApp.config)。
+# 以前这一步是无条件的:把 ~/.folotoy/*.json 全部拷进 Contents/Resources。
+# 理由是 iOS 沙盒里没有家目录,bundle 是唯一两端都成立的位置。代价是口令
+# 躺在产物里,那个 .app 就再也不能发给别人 —— 而这个代价是默认承担的,
+# 谁构建谁中招。
 #
-# ⚠ 这意味着口令会躺在构建产物里。自己用没问题,但**产物不能随便发给
-# 别人**。仓库里始终没有这些文件。
-if compgen -G "$HOME/.folotoy/*.json" > /dev/null; then
-    cp "$HOME"/.folotoy/*.json "$APP/Contents/Resources/" 2>/dev/null || true
-    echo "已打包应用配置: $(ls -1 "$HOME"/.folotoy/*.json | xargs -n1 basename | tr '\n' ' ')"
+# 现在默认不拷,产物干净、可以随便发。自己要往 iPhone 上装、需要把配置
+# 带进去的时候显式开:
+#
+#     FOLO_BUNDLE_CONFIG=1 ./build.sh
+#
+# macOS 上完全不需要开 —— 它直接读 ~/.folotoy/apps/。
+if [ "${FOLO_BUNDLE_CONFIG:-0}" = "1" ]; then
+    shopt -s nullglob
+    cfgs=("$HOME"/.folotoy/apps/*.json "$HOME"/.folotoy/*.json)
+    shopt -u nullglob
+    if [ ${#cfgs[@]} -gt 0 ]; then
+        cp "${cfgs[@]}" "$APP/Contents/Resources/" 2>/dev/null || true
+        echo "⚠ 已把应用配置打进 bundle(含口令),这个产物不要发给别人:"
+        echo "  $(printf '%s ' "${cfgs[@]##*/}")"
+    else
+        echo "FOLO_BUNDLE_CONFIG=1 但 ~/.folotoy/ 下没有 .json,什么都没打包"
+    fi
 else
-    echo "注意: ~/.folotoy/ 下没有 .json,需要配置的应用会显示「未配置」"
+    echo "应用配置未打包(产物干净)。要带进 iOS 构建:FOLO_BUNDLE_CONFIG=1 ./build.sh"
 fi
 
 # 用本机已有的本地签名身份签名,而不是让 swiftc 默认落到 adhoc(每次编译哈希都变,

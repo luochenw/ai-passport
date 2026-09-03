@@ -23,8 +23,14 @@ import (
 const (
 	mealHistoryLimit = 52
 	mealClientQueue  = 16
-	mealBuildingName = "时尚万科中心"
 )
+
+// 这个服务只认哪一栋楼的菜单。
+//
+// ⚠ 不要在这里写死具体的楼名。这是个开源仓库,写死等于把部署者在哪儿上班
+// 一起公开了 —— 而且对别人也没用,他们的食堂不叫这个名字。
+// 由部署时的 MEAL_BUILDING 决定;不设就不校验,菜单文件里写什么就是什么。
+func mealBuildingName() string { return os.Getenv("MEAL_BUILDING") }
 
 var mealFloorPattern = regexp.MustCompile(`(?i)(\d{1,2})\s*(?:层|f)`)
 
@@ -468,8 +474,8 @@ func (h *mealHub) installedClientsLocked() []*mealSubscriber {
 
 func normalizeMealWeek(week *mealWeek, location *time.Location, now time.Time) error {
 	week.Building = cleanField(week.Building, 96)
-	if week.Building != mealBuildingName {
-		return fmt.Errorf("building must be %s", mealBuildingName)
+	if want := mealBuildingName(); want != "" && week.Building != want {
+		return fmt.Errorf("building must be %s", want)
 	}
 	if len(week.Days) == 0 {
 		return errors.New("at least one menu day is required")
@@ -507,10 +513,9 @@ func normalizeMealWeek(week *mealWeek, location *time.Location, now time.Time) e
 	}
 	sort.Slice(normalized, func(i, j int) bool { return normalized[i].Date < normalized[j].Date })
 	week.Days = normalized
+	// 来源标签由菜单文件自己带。以前这里有个写死的默认值,那是部署者
+	// 自己食堂的名字,不该出现在开源代码里。
 	week.Source = cleanField(week.Source, 96)
-	if week.Source == "" {
-		week.Source = "字节餐厅"
-	}
 	week.Updated = now.In(location).Format(time.RFC3339)
 	return nil
 }

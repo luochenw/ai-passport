@@ -37,8 +37,8 @@ struct TestMealClient {
           "type": "meal_state",
           "weeks": [{
             "weekOf": "2026-08-31",
-            "building": "时尚万科中心",
-            "source": "字节餐厅",
+            "building": "示例大厦",
+            "source": "示例餐厅",
             "updatedAt": "2026-09-03T11:00:00+08:00",
             "days": [{
               "date": "2026-09-03",
@@ -82,8 +82,8 @@ struct TestMealClient {
           "type": "meal_state",
           "weeks": [{
             "weekOf": "2026-08-31",
-            "building": "时尚万科中心",
-            "source": "字节餐厅",
+            "building": "示例大厦",
+            "source": "示例餐厅",
             "updatedAt": "2026-09-03T11:00:00+08:00",
             "days": [{
               "date": "2026-09-03",
@@ -111,7 +111,7 @@ struct TestMealClient {
             outlets: [], recommendedFloor: "2层", recommendation: "测试")
         let oneDayWeek = MealWeek(
             weekOf: "2026-08-31",
-            building: "时尚万科中心",
+            building: "示例大厦",
             source: "测试",
             updatedAt: "2026-09-03T11:00:00+08:00",
             days: [

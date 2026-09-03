@@ -72,32 +72,14 @@ final class DashboardApp: RemoteApp {
     /// 它就是接我自己那台 NAS。所以没有设置界面,配套 app 里也不出现任何
     /// 输入框:那些是这个应用的内部实现,不该抬到界面上。
     ///
-    /// 配置从两个地方找,按顺序:
-    ///
-    ///  1. `~/.folotoy/dashboard.json`(只有 macOS 有家目录这个概念)
-    ///     开发时改完立刻生效,不用重新构建。
-    ///  2. app bundle 里的 `dashboard.json` —— 由 build.sh / build-ios.sh
-    ///     在构建时从上面那个文件拷进去。
-    ///
-    /// 第 2 条是 iOS 能跑起来的原因:沙盒里没有家目录,但 bundle 一定在。
-    /// `Bundle.main.url(forResource:)` 两端都成立,不需要任何平台判断。
-    ///
-    /// ⚠ 代价要说清楚:口令因此会躺在构建产物里。在自己机器上、自己手机上
-    /// 用没问题(跟原来那个 600 文件是同一个安全水位),但**这个 .app 就
-    /// 不能随便发给别人了** —— 谁拿到它就拿到了 NAS 口令。仓库里始终没有
-    /// 这个文件,这一点没变。
+    /// 查找顺序、平台差异、以及"为什么默认构建产物里没有配置",全部收在
+    /// AppConfigStore 里 —— 以前每个应用各写一遍逐字相同的查找逻辑。
     private var config: Config? {
-        #if os(macOS)
-        if let data = FileManager.default.contents(
-            atPath: (NSHomeDirectory() as NSString).appendingPathComponent(".folotoy/dashboard.json")),
-           let cfg = try? JSONDecoder().decode(Config.self, from: data) {
-            return cfg
-        }
-        #endif
-        guard let url = Bundle.main.url(forResource: "dashboard", withExtension: "json"),
-              let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(Config.self, from: data)
+        AppConfigStore.load(Config.self, for: Self.configID)
     }
+
+    /// 配置文件名。跟应用 id 一致。
+    static let configID = "dashboard"
 
     func setActive(_ active: Bool) {
         queue.async {

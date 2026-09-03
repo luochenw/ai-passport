@@ -66,28 +66,29 @@ run_static_checks() {
         # 点进去一片空白、或者"正在读取…"永远挂着。
         swiftc -o "${test_dir}/test_remote_apps" \
             tests/test_remote_apps.swift \
-            mac-relay/FoloCodexRelay/Shared/RemoteApps.swift \
-            mac-relay/FoloCodexRelay/Shared/CodexApp.swift \
-            mac-relay/FoloCodexRelay/Shared/Protocol.swift
+            mac-relay/FoloCodexRelay/Shared/Framework/RemoteApps.swift \
+            mac-relay/FoloCodexRelay/Shared/Apps/Codex/CodexApp.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Protocol.swift
         # ⚠ 用隔离的 HOME 跑:配置层在 macOS 上会写 ~/.folotoy/<name>.json,
         # 拿真实家目录跑测试会污染(甚至覆盖)用户自己的配置。
         HOME="${test_dir}" "${test_dir}/test_remote_apps"
 
         swiftc -o "${test_dir}/test_walkie_protocol" \
             tests/test_walkie_protocol.swift \
-            mac-relay/FoloCodexRelay/Shared/WalkieProtocol.swift
+            mac-relay/FoloCodexRelay/Shared/Apps/Walkie/WalkieProtocol.swift
         "${test_dir}/test_walkie_protocol"
 
         swiftc -o "${test_dir}/test_walkie_client" \
             tests/test_walkie_client.swift \
-            mac-relay/FoloCodexRelay/Shared/WalkieClient.swift \
-            mac-relay/FoloCodexRelay/Shared/WalkieProtocol.swift
+            mac-relay/FoloCodexRelay/Shared/Apps/Walkie/WalkieClient.swift \
+            mac-relay/FoloCodexRelay/Shared/Apps/Walkie/WalkieProtocol.swift
         HOME="${test_dir}" "${test_dir}/test_walkie_client"
 
         swiftc -o "${test_dir}/test_meal_client" \
             tests/test_meal_client.swift \
-            mac-relay/FoloCodexRelay/Shared/MealClient.swift \
-            mac-relay/FoloCodexRelay/Shared/MealProtocol.swift
+            mac-relay/FoloCodexRelay/Shared/Apps/Meal/MealClient.swift \
+            mac-relay/FoloCodexRelay/Shared/Apps/Meal/MealProtocol.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/AppConfigStore.swift
         HOME="${test_dir}" "${test_dir}/test_meal_client"
     else
         echo "跳过 test_remote_apps:本机没有 swiftc"

@@ -3,7 +3,7 @@ import SwiftUI
 
 final class MealApp: ObservableObject, RemoteApp {
     let name = "吃饭"
-    let detail = "时尚万科每周菜单"
+    let detail = "本周菜单与楼层推荐"
     let defaultIcon = DeviceIcon.find("\u{F0C9}").glyph
     let settingsRoute: RemoteAppSettingsRoute? = .meal
     var requestPush: (() -> Void)?

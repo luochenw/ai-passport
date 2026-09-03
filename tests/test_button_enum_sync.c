@@ -42,7 +42,7 @@ static void check(const char *src, const char *enum_name, const char *case_name,
 int main(int argc, char **argv)
 {
     const char *path = (argc > 1) ? argv[1]
-                                  : "mac-relay/FoloCodexRelay/Shared/RemoteApps.swift";
+                                  : "mac-relay/FoloCodexRelay/Shared/Framework/RemoteApps.swift";
     FILE *f = fopen(path, "rb");
     if (!f) { printf("读不到 %s\n", path); return 1; }
     static char src[262144];

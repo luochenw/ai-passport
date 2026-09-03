@@ -27,8 +27,9 @@ def main() -> int:
         print(f"read menu: {exc}", file=sys.stderr)
         return 2
 
-    if payload.get("building") != "时尚万科中心":
-        print("menu building must be 时尚万科中心", file=sys.stderr)
+    want = os.environ.get("MEAL_BUILDING", "")
+    if want and payload.get("building") != want:
+        print(f"menu building must be {want}", file=sys.stderr)
         return 2
 
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
