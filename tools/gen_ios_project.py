@@ -112,16 +112,12 @@ def main():
     #
     # 用 /bin/sh 写,不用 compgen(那是 bash 内建,Xcode 的脚本阶段默认 sh)。
     config_script = (
-        'rm -f \\"${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}/dashboard.json\\" '
-        '\\"${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}/meal.json\\"\\n'
+        'rm -f \\"${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}/meal.json\\"\\n'
         'for f in \\"$HOME\\"/.folotoy/*.json; do\\n'
         '  [ -e \\"$f\\" ] || continue\\n'
         '  cp \\"$f\\" \\"${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}/\\"\\n'
         '  echo \\"\\u5df2\\u6253\\u5305: $(basename \\"$f\\")\\"\\n'
-        'done\\n'
-        '/usr/bin/python3 \\"${SRCROOT}/../tools/configure_ios_dashboard_ats.py\\" '
-        '\\"${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}/Info.plist\\" '
-        '\\"${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}/dashboard.json\\"'
+        'done'
     )
 
     text = f'''// !$*UTF8*$!

@@ -5,7 +5,7 @@ import Foundation
 //
 // 跟另一个方案的取舍
 // ──────────────────
-// 本来可以照着 DashboardApp 那样从零写一个:自己扫 ~/.codex/sessions、自己
+// 本来可以从零写一个:自己扫 ~/.codex/sessions、自己
 // 分页、自己判断哪个会话是活的。没那么做,是因为 CodexBrowserModel 里那套
 // 逻辑不是"读几个文件"那么简单 —— 它要按 cwd 归并工作区、按 mtime 排序、
 // 跟踪文件增长做增量刷新、从 rollout 文件里挖出 session_id 和**最后一轮实际

@@ -6,12 +6,6 @@
     "sha256": "0f91304741d46c432efac77adff65891f31fa0d3841e0073bba3a6aef46be468"
   },
   {
-    "id": "dashboard",
-    "name": "服务器面板",
-    "url": "dashboard.json",
-    "sha256": "ee164c77edce29c0bdc45d7f730cfa1baa93d755f3569b9818b874f8650b6553"
-  },
-  {
     "id": "meal",
     "name": "吃饭",
     "url": "meal.json",
