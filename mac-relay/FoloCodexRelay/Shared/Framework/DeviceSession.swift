@@ -193,19 +193,21 @@ final class DeviceSession {
         }
 
         #if os(macOS)
-        let codexApp = CodexApp(browser: codexBrowser)
+        let codexCapability = CodexCapability(browser: codexBrowser)
         #else
-        let codexApp = CodexApp(
+        let codexCapability = CodexCapability(
             browser: nil,
             unavailableReason: "Codex 需要在 Mac 上运行:它要启动 codex 命令行进程并读取本机的会话记录,iOS 两者都做不到。"
         )
         #endif
         #if os(macOS)
-        codexSink = { [weak codexApp] kind, index, total, text in
-            codexApp?.handleOutput(kind: kind, index: index, total: total, text: text)
+        codexSink = { [weak codexCapability] kind, index, total, text in
+            codexCapability?.handleOutput(kind: kind, index: index, total: total, text: text)
         }
         #endif
-        remoteHost.register(codexApp)
+        if let manifest = ManifestStore.load(CodexCapability.id) {
+            remoteHost.register(ManifestApp(manifest: manifest, capability: codexCapability))
+        }
 
         walkieClient.sendDeviceControl = { [relay] operation, stream in
             relay.sendWalkieControl(operation: operation, stream: stream, to: deviceID)

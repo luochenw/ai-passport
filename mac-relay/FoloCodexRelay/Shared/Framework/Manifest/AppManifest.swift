@@ -31,10 +31,23 @@ indirect enum ManifestRow {
     case when(cond: String, then: [ManifestRow], otherwise: [ManifestRow])
     /// 遍历数组。循环体里 `.` 开头的路径指向当前项。
     case each(path: String, limit: Int?, body: [ManifestRow])
+    /// 带选中项的列表。
+    ///
+    /// 跟 `each` 的区别不只是多一个箭头:列表要**开窗**。设备一屏放不下十几
+    /// 个工作区,选中项滚出可视区之后用户就看不见自己选在哪儿了。开窗、
+    /// 上下的"还有 N 项"、选中标记,这些每个列表应用都要,而且都该长一样 ——
+    /// 让每份清单自己拼,只会拼出三种不一样的列表。
+    case list(path: String, selected: String, limit: Int?, empty: String?)
 }
 
-/// 一屏。上下键在多屏之间翻页。
+/// 一屏。
+///
+/// 多屏有两种用法,互斥:
+///  · 不写 `id` —— 上下键在几屏之间翻页(看板的五页)
+///  · 写了 `id` —— 由能力决定现在是哪一屏(Codex 的工作区/会话/阅读),
+///    能力在 `state()` 里给一个 `screen` 字段,值就是这里的 id
 struct ManifestScreen {
+    var id: String?
     var title: String
     var rows: [ManifestRow]
     var footer: String?
@@ -68,8 +81,8 @@ struct AppManifest {
 
 extension ManifestRow: Decodable {
     private enum Keys: String, CodingKey {
-        case text, bar, spacer, when, each
-        case label, value, cond, then, `else`, path, limit, body
+        case text, bar, spacer, when, each, list
+        case label, value, cond, then, `else`, path, limit, body, selected, empty
     }
 
     init(from decoder: Decoder) throws {
@@ -91,6 +104,13 @@ extension ManifestRow: Decodable {
                          otherwise: try w.decodeIfPresent([ManifestRow].self, forKey: .else) ?? [])
             return
         }
+        if let l = try? c.nestedContainer(keyedBy: Keys.self, forKey: .list) {
+            self = .list(path: try l.decode(String.self, forKey: .path),
+                         selected: try l.decodeIfPresent(String.self, forKey: .selected) ?? "",
+                         limit: try l.decodeIfPresent(Int.self, forKey: .limit),
+                         empty: try l.decodeIfPresent(String.self, forKey: .empty))
+            return
+        }
         if let e = try? c.nestedContainer(keyedBy: Keys.self, forKey: .each) {
             self = .each(path: try e.decode(String.self, forKey: .path),
                          limit: try e.decodeIfPresent(Int.self, forKey: .limit),
@@ -99,7 +119,7 @@ extension ManifestRow: Decodable {
         }
         throw DecodingError.dataCorruptedError(
             forKey: .text, in: c,
-            debugDescription: "行必须是 text / bar / spacer / when / each 之一")
+            debugDescription: "行必须是 text / bar / spacer / when / each / list 之一")
     }
 }
 

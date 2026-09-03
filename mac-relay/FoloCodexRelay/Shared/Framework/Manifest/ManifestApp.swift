@@ -23,6 +23,13 @@ final class ManifestApp: RemoteApp {
     /// 清单里写的是路由名(字符串),这里翻成枚举。翻不出来就是没有设置页 ——
     /// 一个更新的清单可能引用了这个伴侣端还没有的设置页,那时候少一个齿轮
     /// 图标,远好过点进去一片空白。
+    /// 这一端跑不了的原因。从能力的覆盖层里取 —— 应用列表要能显示出来
+    /// (灰掉 + 一句原因),而不是让用户装上、点进去才发现是空的。
+    var unavailableReason: String? {
+        if case let .unavailable(reason, _) = capability.overlay { return reason }
+        return nil
+    }
+
     var settingsRoute: RemoteAppSettingsRoute? {
         manifest.settings.flatMap(RemoteAppSettingsRoute.init(rawValue:))
     }
@@ -54,19 +61,28 @@ final class ManifestApp: RemoteApp {
             return overlay.render(title: manifest.name)
         }
 
-        lock.lock()
-        let idx = min(page, manifest.screens.count - 1)
-        lock.unlock()
-
-        let screen = manifest.screens[idx]
         let root = capability.state()
 
+        // 屏幕由谁决定:能力给了 `screen` 就听它的(Codex 的导航栈),
+        // 没给就按上下翻页的那个下标(看板的五页)。
+        let byID = root.value(at: "screen").stringValue
+        let idx: Int
+        if !byID.isEmpty, let i = manifest.screens.firstIndex(where: { $0.id == byID }) {
+            idx = i
+        } else {
+            lock.lock()
+            idx = min(page, manifest.screens.count - 1)
+            lock.unlock()
+        }
+        let screen = manifest.screens[idx]
+
         var s = Screen()
-        // 多屏时标题带页码 —— 用户得知道还有别的页,以及自己在第几页。
+        // 翻页式多屏才带页码 —— 用户得知道还有别的页、自己在第几页。
+        // 能力驱动的多屏(Codex 的工作区→会话→阅读)不是"第几页",给它
+        // 加个 1/3 只会误导。
         let title = Template.render(screen.title, root)
-        s.title = manifest.screens.count > 1
-            ? "\(title)  \(idx + 1)/\(manifest.screens.count)"
-            : title
+        let paged = manifest.screens.count > 1 && manifest.screens.allSatisfy { $0.id == nil }
+        s.title = paged ? "\(title)  \(idx + 1)/\(manifest.screens.count)" : title
         emit(screen.rows, root, into: &s)
         if let footer = screen.footer {
             s.footer = Template.render(footer, root)
@@ -89,8 +105,9 @@ final class ManifestApp: RemoteApp {
             return capability.perform(action)
         }
 
-        // 没绑的话,上下键是翻页。只有一屏就什么都不做。
-        guard manifest.screens.count > 1 else { return false }
+        // 没绑的话,上下键是翻页。只有一屏、或者屏幕由能力决定时都不翻。
+        guard manifest.screens.count > 1,
+              manifest.screens.allSatisfy({ $0.id == nil }) else { return false }
         switch (button, event) {
         case (.up, .click), (.up, .hold):
             lock.lock()
@@ -125,6 +142,17 @@ final class ManifestApp: RemoteApp {
             case let .when(cond, then, otherwise):
                 emit(Template.condition(cond, root) ? then : otherwise, root, into: &s)
 
+            case let .list(path, selected, limit, empty):
+                let items = root.value(at: path).arrayValue
+                guard !items.isEmpty else {
+                    if let empty { s.text(Template.render(empty, root)) }
+                    continue
+                }
+                let sel = Int(root.value(at: selected).doubleValue)
+                emitList(items, selected: sel,
+                         visible: min(limit ?? Self.defaultListRows, Self.hardEachLimit),
+                         into: &s)
+
             case let .each(path, limit, body):
                 var items = root.value(at: path).arrayValue
                 // ⚠ 一定要有上限。屏幕只有 8 行左右,而这个数组是**能力**
@@ -141,6 +169,27 @@ final class ManifestApp: RemoteApp {
         }
     }
 
+    /// 列表开窗。
+    ///
+    /// 选中项要留在可视区里 —— 十几个工作区一屏放不下,选中项滚出去之后
+    /// 用户就不知道自己停在哪儿了。上下的"还有 N 项"也不能省:没有它,
+    /// 列表看起来就是全部内容,用户不会想到还能继续往下。
+    private func emitList(_ items: [JSONValue], selected: Int, visible: Int,
+                          into s: inout Screen) {
+        var start = 0
+        if items.count > visible {
+            start = max(0, min(selected - visible / 2, items.count - visible))
+        }
+        let end = min(items.count, start + visible)
+        if start > 0 { s.text("  ↑ 还有 \(start) 项") }
+        for i in start..<end {
+            s.text((i == selected ? "> " : "  ") + items[i].stringValue)
+        }
+        if end < items.count { s.text("  ↓ 还有 \(items.count - end) 项") }
+    }
+
+    /// 列表默认显示几行。跟迁移之前的 appendList 一致。
+    private static let defaultListRows = 10
     /// 清单没写 limit 时的默认条数。设备一屏放得下的量级。
     private static let defaultEachLimit = 8
     /// 清单写了也不能超过这个 —— 清单是从网上来的,不能让它决定
@@ -173,16 +222,21 @@ private extension RemoteButton {
 private extension RemoteButtonEvent {
     /// 清单里能绑的事件名。
     ///
-    /// 只暴露这四个。设备侧还会发 double / long / longUp —— 那三个在框架里
-    /// 有固定含义(双击返回、长按退出),放开给清单绑会让某个应用把"返回"
-    /// 抢走,用户就出不来了。
+    /// `double` 也放开,因为"双击确定返回上一级"是真需求(Codex 的
+    /// 工作区→会话→阅读三级导航)。放开是安全的:能力 `perform` 返回
+    /// false 时,这一下会继续往上交给框架,框架的"退出应用"照常生效 ——
+    /// 也就是说清单**抢不走**返回,它只能在自己还有上一级时先消费掉。
+    ///
+    /// `long` / `longUp` 不放开:长按下键是设备侧写死的录音手势
+    /// (见 Screen.mic),给清单绑只会跟录音打架。
     var manifestName: String? {
         switch self {
         case .press: return "press"
         case .release: return "release"
         case .click: return "click"
         case .hold: return "hold"
-        case .double, .long, .longUp: return nil
+        case .double: return "double"
+        case .long, .longUp: return nil
         }
     }
 }

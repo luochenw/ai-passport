@@ -34,12 +34,14 @@ protocol CodexBackend: AnyObject {
     func handleRequest(req: UInt8, a: UInt8, b: UInt8)
 }
 
-final class CodexApp: RemoteApp {
+final class CodexCapability: AppCapability {
+    static let id = "codex"
+    /// 只留给覆盖层当标题。名字、说明、图标在清单里。
     let name = "Codex"
     let detail = "浏览会话,长按下键说话"
     // Codex 是个终端里的东西,用键盘图标。
     let defaultIcon = DeviceIcon.find("\u{F11C}").glyph
-    var requestPush: (() -> Void)?
+    var onChange: (() -> Void)?
     var notify: ((String) -> Void)?
 
     private enum Mode {
@@ -152,7 +154,7 @@ final class CodexApp: RemoteApp {
             break
         }
         lock.unlock()
-        if changed { requestPush?() }
+        if changed { onChange?() }
     }
 
     // MARK: RemoteApp
@@ -169,109 +171,109 @@ final class CodexApp: RemoteApp {
         browser.handleRequest(req: CmdReq.listWorkspaces, a: 0, b: 0)
     }
 
-    func render() -> Screen {
-        lock.lock()
-        defer { lock.unlock() }
-
-        // 三层覆盖("跑不了 / 加载中 / 出错了")在框架里,不在这儿各写一遍。
-        // 优先级也由框架定:错误盖住一切,然后是跑不了,最后才是加载中。
-        if let overlay = currentOverlay {
-            return overlay.render(title: "Codex")
-        }
-
-        var s = Screen()
-
+    /// 交给模板取值的那棵树。
+    ///
+    /// `screen` 决定解释器画哪一屏 —— 三级导航是能力的状态,不是"第几页"。
+    func state() -> JSONValue {
+        lock.lock(); defer { lock.unlock() }
         switch mode {
         case .workspaces:
-            s.title = "Codex 工作区"
-            if workspaces.isEmpty {
-                s.text(status ?? "没有找到工作区")
-            } else {
-                appendList(&s, workspaces, sel: wsSel)
-            }
-            s.footer = "上/下选择  确定进入"
-
+            return .object([
+                "screen": .string("workspaces"),
+                "workspaces": .array(workspaces.map { .string($0) }),
+                "wsSel": .number(Double(wsSel)),
+                "status": .string(status ?? ""),
+            ])
         case .sessions:
-            s.title = "会话"
-            if sessions.isEmpty {
-                s.text(status ?? "这个工作区没有会话")
-            } else {
-                appendList(&s, sessions, sel: sessSel)
-            }
-            s.footer = "确定打开  双击确定返回"
-
+            return .object([
+                "screen": .string("sessions"),
+                "sessions": .array(sessions.map { .string($0) }),
+                "sessSel": .number(Double(sessSel)),
+                "status": .string(status ?? ""),
+            ])
         case .reading:
-            s.title = pageTotal > 0 ? "\(pageIsUser ? "我" : "Codex")  \(pageIndex + 1)/\(pageTotal)"
-                                    : (pageIsUser ? "我" : "Codex")
-            if let st = status {
-                s.text(st)
-            } else {
-                for line in DeviceText.wrap(pageText, limit: DeviceText.bodyRows) { s.text(line) }
-            }
-            s.footer = "上/下翻页  双击确定返回"
-            // 只有阅读界面收语音:说话是"对当前这个会话说",在工作区列表上
-            // 录音没有明确的收件人。
-            s.mic = true
+            // 标题("我  3/12" 还是就一个"我")在这里拼好。
+            // 模板里没有嵌套表达式,也**不该**有 —— 一个能在字符串里套
+            // 条件的模板语言,离变成半个编程语言只差几次"再加一点点"。
+            let who = pageIsUser ? "我" : "Codex"
+            return .object([
+                "screen": .string("reading"),
+                "title": .string(pageTotal > 0 ? "\(who)  \(pageIndex + 1)/\(pageTotal)" : who),
+                "status": .string(status ?? ""),
+                // 折行在这儿做完 —— 那是真计算,不该进模板语言。
+                "lines": .array(status == nil
+                    ? DeviceText.wrap(pageText, limit: DeviceText.bodyRows).map { .string($0) }
+                    : []),
+            ])
         }
-        return s
     }
 
-    func handleKey(_ button: RemoteButton, _ event: RemoteButtonEvent) -> Bool {
+    var overlay: AppOverlay? {
+        lock.lock(); defer { lock.unlock() }
+        return currentOverlay
+    }
+    /// 清单把按键绑到这些具名动作上。
+    ///
+    /// 三级导航(工作区 → 会话 → 阅读)由能力自己管:它在 state() 里给一个
+    /// `screen` 字段,解释器据此选屏。清单只声明每一屏长什么样、键绑到哪个
+    /// 动作 —— 它不知道也不需要知道现在是第几级。
+    @discardableResult
+    func perform(_ action: String) -> Bool {
         lock.lock()
-        // 任意键先清掉挂着的错误,并且**只**做这一件事 —— 否则用户为了消掉
-        // 提示按的那一下会顺带翻页,看不清刚才发生了什么。这条规则收在
-        // PinnedError.consumeKey 里,三个应用共用同一份。
-        if pinned.consumeKey() {
-            lock.unlock()
-            return true
-        }
         let m = mode
         lock.unlock()
 
-        switch m {
-        case .workspaces:
-            switch (button, event) {
-            case (.up, .click), (.up, .hold):    return moveSelection(-1)
-            case (.down, .click), (.down, .hold): return moveSelection(1)
-            case (.ok, .click):
+        switch action {
+        case "up":   return moveSelection(-1)
+        case "down": return moveSelection(1)
+
+        case "open":
+            switch m {
+            case .workspaces:
                 lock.lock(); let i = wsSel; loading = "正在读取会话…"; lock.unlock()
                 browser?.handleRequest(req: CmdReq.listSessions, a: UInt8(min(i, 255)), b: 0)
                 return true          // 立刻把过场屏推出去
-            default: return false
-            }
-
-        case .sessions:
-            switch (button, event) {
-            case (.up, .click), (.up, .hold):    return moveSelection(-1)
-            case (.down, .click), (.down, .hold): return moveSelection(1)
-            case (.ok, .click):
+            case .sessions:
                 lock.lock(); let w = wsSel; let ss = sessSel; loading = "正在打开会话…"; lock.unlock()
                 browser?.handleRequest(req: CmdReq.openSession,
-                                      a: UInt8(min(w, 255)), b: UInt8(min(ss, 255)))
-                return true          // 立刻把过场屏推出去
-            case (.ok, .double):
-                lock.lock(); mode = .workspaces; loading = nil; lock.unlock()
+                                       a: UInt8(min(w, 255)), b: UInt8(min(ss, 255)))
                 return true
-            default: return false
+            case .reading:
+                return false
             }
 
-        case .reading:
-            switch (button, event) {
-            // 翻页方向:0 = 上一页,1 = 下一页(见 CodexBrowserModel.handlePage)。
-            case (.up, .click), (.up, .hold):
-                browser?.handleRequest(req: CmdReq.page, a: 0, b: 0)
-                return false          // 翻页很快,不值得为它闪一屏过场
-            case (.down, .click), (.down, .hold):
-                browser?.handleRequest(req: CmdReq.page, a: 1, b: 0)
-                return false
-            case (.ok, .double):
+        case "back":
+            // ⚠ 只在**还有上一级**的时候消费这一下。在工作区里返回 false,
+            // 让它继续往上交给框架去退出应用 —— 吃掉的话用户就出不来了。
+            switch m {
+            case .workspaces: return false
+            case .sessions:
+                lock.lock(); mode = .workspaces; loading = nil; lock.unlock()
+                return true
+            case .reading:
                 lock.lock(); mode = .sessions; loading = nil; lock.unlock()
                 return true
-            default: return false
             }
+
+        // 翻页方向:0 = 上一页,1 = 下一页(见 CodexBrowserModel.handlePage)。
+        // 返回 false:翻页很快,不值得为它闪一屏过场。
+        case "prevPage":
+            browser?.handleRequest(req: CmdReq.page, a: 0, b: 0)
+            return false
+        case "nextPage":
+            browser?.handleRequest(req: CmdReq.page, a: 1, b: 0)
+            return false
+
+        default: return false
         }
     }
 
+    /// 挂着的错误被任意键清掉。这条规则在框架里(PinnedError.consumeKey),
+    /// 三个应用共用同一份 —— 清错误的那一下不能顺带翻页。
+    func dismissOverlayError() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return pinned.consumeKey()
+    }
     // MARK: 私有
 
     private func moveSelection(_ delta: Int) -> Bool {
@@ -288,23 +290,6 @@ final class CodexApp: RemoteApp {
             return false
         }
         return true
-    }
-
-    /// 列表带一个滚动窗口:设备一屏放不下 12 行以上,而工作区可能有几十个。
-    /// 没有窗口的话选中项一旦超出前 11 项就永远看不见了 —— 而按键还在响应,
-    /// 表现为"按下键没反应"。
-    private func appendList(_ s: inout Screen, _ items: [String], sel: Int) {
-        let visible = 10
-        var start = 0
-        if items.count > visible {
-            start = max(0, min(sel - visible / 2, items.count - visible))
-        }
-        let end = min(items.count, start + visible)
-        if start > 0 { s.text("  ↑ 还有 \(start) 项") }
-        for i in start..<end {
-            s.text((i == sel ? "> " : "  ") + items[i])
-        }
-        if end < items.count { s.text("  ↓ 还有 \(items.count - end) 项") }
     }
 
 }

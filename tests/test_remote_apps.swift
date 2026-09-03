@@ -396,7 +396,14 @@ struct TestRemoteApps {
         do {
             // iOS 上没有 Codex 后端 —— 内核禁止 fork/exec,沙盒里也没有
             // ~/.codex/sessions。注入 nil 模拟。
-            let ios = CodexApp(browser: nil)
+            // ⚠ 用**仓库里真实那份** codex.json,不是测试自己捏一个。
+            // 捏一份就只能证明解释器работает,证明不了发出去的那份清单是对的 ——
+            // 而清单写错的表现恰恰是设备上某一行悄悄变空。
+            guard let codexManifest = ManifestStore.load("codex") else {
+                print("  ✗ 读不到 codex 清单"); exit(1)
+            }
+            let iosCap = CodexCapability(browser: nil)
+            let ios = ManifestApp(manifest: codexManifest, capability: iosCap)
             check(ios.unavailableReason != nil, "没有后端时,应用自己知道本端跑不了")
 
             // ⚠ 关键:setActive 之后 render() 必须出说明,不能挂在"正在读取…"。
@@ -413,7 +420,8 @@ struct TestRemoteApps {
                 func handleRequest(req: UInt8, a: UInt8, b: UInt8) { requests.append(req) }
             }
             let backend = FakeBackend()
-            let mac = CodexApp(browser: backend)
+            let mac = ManifestApp(manifest: codexManifest,
+                                  capability: CodexCapability(browser: backend))
             checkEqual(mac.unavailableReason, nil, "有后端时不声称跑不了")
             mac.setActive(true)
             checkEqual(backend.requests, [CmdReq.listWorkspaces], "有后端时照常去要工作区")
