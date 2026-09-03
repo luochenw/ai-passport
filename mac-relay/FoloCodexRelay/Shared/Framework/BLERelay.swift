@@ -71,6 +71,16 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     private let bleQueue = DispatchQueue(label: "com.folotoy.codexrelay.ble")
 
     private var central: CBCentralManager!
+
+    /// 扫描暂停到什么时候。
+    ///
+    /// 用**截止时刻**而不是"传输中"的布尔或引用计数,是因为这两种都有同一个
+    /// 要命的失败模式:任何一条没配对上的退出路径(安装超时放弃、设备中途
+    /// 断开、进程状态被重置)都会把扫描永久关掉,而现象是"设备列表再也不
+    /// 更新了" —— 没有报错,查起来和 BLE 本身的毛病分不清。
+    ///
+    /// 截止时刻自愈:不再有新批次刷新它,时间一到扫描自己回来。
+    private var scanPausedUntil = Date.distantPast
     /// 扫到过的一台设备。
     ///
     /// id 用 CBPeripheral.identifier,**不用广播名**:名字在 iOS 后台广播里
@@ -374,6 +384,20 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         // 三五台设备的场景下,不持续扫就永远只看得见当前连着的那一台,
         // 用户没有办法切到别的设备上 —— 界面上会是一份永远只有一行的列表。
         // 代价是持续扫描的功耗,对一个桌面常驻程序可以接受。
+        //
+        // 但"持续扫描"和"正在灌固件"不能同时进行:扫描和连接事件抢的是同一个
+        // 射频。实测 4 台在线 + 全程扫描时,每批 64 片只有 ~44 片能连续到达,
+        // 剩下的等 5 秒超时重发,一批要试三四次 —— 3 分钟只推进 604/8159 片,
+        // 最后还撞上连续超时被放弃。装固件的那几十秒里没人需要发现新设备。
+        guard Date() >= scanPausedUntil else { return }
+        // ⚠ 已经在扫就不要再下一次命令。
+        //
+        // 上面那个"连上也不停扫"的改动让扫描变成了常驻状态,而看门狗每 5 秒
+        // 无条件调一次这里 —— 它注释里写的"scanForPeripherals 在已经扫描时
+        // 是 no-op",只在扫描是短暂的、连上就停的年代才成立。改成常驻之后,
+        // 这就变成每 5 秒重下一次扫描命令(实测一次传输的 3 分钟里重下了 118
+        // 次),而且带着 allowDuplicates —— macOS 上占空比最高的那档。
+        guard !central.isScanning else { return }
         log("开始扫描 \(Self.namePrefix)* ...")
         #if os(iOS)
         // Background discovery only wakes for explicitly requested services.
@@ -394,15 +418,40 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         central.scanForPeripherals(withServices: services, options: options)
     }
 
+    /// 大块传输期间别扫描。
+    ///
+    /// 挂在发送路径上而不是安装的生命周期上:每发一批就把窗口往后推一点,
+    /// 停发了窗口自己过期。这样无论安装是正常结束、超时放弃还是设备直接
+    /// 拔掉,都不需要有人记得"把扫描打开",也就不存在漏掉某条退出路径。
+    ///
+    /// 窗口取 15 秒:比批次超时(5 秒)长,所以一次重发不会让扫描在传输
+    /// 中途插进来;又足够短,传输一结束扫描很快回来。
+    private func pauseScanForBulkTransfer() {
+        let until = Date().addingTimeInterval(15)
+        guard until > scanPausedUntil else { return }
+        let wasPaused = Date() < scanPausedUntil
+        scanPausedUntil = until
+        guard !wasPaused else { return }
+        if central != nil, central.isScanning {
+            central.stopScan()
+            log("传输大块数据,暂停扫描")
+        }
+    }
+
     private func restartScanForCurrentState() {
         guard central != nil, central.state == .poweredOn else { return }
         central.stopScan()
         startScanIfNeeded()
     }
 
-    /// Safety net: periodically make sure we are scanning if we've never found the
-    /// device yet. Cheap and idempotent (scanForPeripherals is a no-op if already
-    /// scanning), so this is a harmless belt-and-suspenders check.
+    /// 兜底:定期确认扫描还开着。
+    ///
+    /// 幂等性现在由 startScanIfNeeded 里的 `!central.isScanning` 保证 —— 原来
+    /// 这里写的是"scanForPeripherals 在已经扫描时是 no-op",那是在"连上就停扫"
+    /// 的年代;改成常驻扫描之后它就成了每 5 秒重下一次扫描命令。
+    ///
+    /// 它同时也是传输结束后扫描的**恢复**路径:暂停窗口过期后,下一次看门狗
+    /// 醒来就把扫描重新打开,不需要谁去显式恢复。
     private func scheduleWatchdog() {
         bleQueue.asyncAfter(deadline: .now() + 5.0) { [weak self] in
             guard let self = self else { return }
@@ -1027,6 +1076,7 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
                 completion()
                 return
             }
+            self.pauseScanForBulkTransfer()
             self.drainAppStoreBatch(chunks, from: 0, on: link, completion: completion)
         }
     }
