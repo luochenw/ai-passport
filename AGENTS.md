@@ -35,8 +35,81 @@ This file is the only mandatory entry point for AI-assisted work in this reposit
 | Project completion | `docs/development/release/project-completion.md` (then the `issue-suggestions` or `experience-pr` skill) |
 | Documentation | `docs/contribution/doc-conventions.md`, `docs/README.md` |
 | Commit or PR | `docs/contribution/commit-and-pr.md` |
+| Companion app, device apps, notifications | `mac-relay/FoloCodexRelay/Shared/RemoteApps.swift`, `main/remote_ui.h`, `main/ui_notify.h` |
 
 Use `docs/README.md` for the product overview and the documentation index. For the detailed AI development workflow — context setup, source-of-truth priority, application/BSP boundary, runtime invariants, material placement, and delivery format — read `docs/development/ai-guide.md`. Fork-specific workflow is in `docs/fork-guide.md` and is not required for ordinary upstream development.
+
+## Companion app (`mac-relay/`)
+
+The device is a **display terminal**: application logic runs on the Mac/iPhone
+and is pushed over BLE as screen-description text. A "device app" is a Swift
+type conforming to `RemoteApp`, not firmware.
+
+- **`Shared/` must compile for iOS.** The split is by *capability*, not by
+  platform name. Anything the iPhone genuinely cannot do — spawning a process,
+  reading `~/.codex/sessions` — goes in `macOS/`. Verify with:
+
+  ```bash
+  SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+  swiftc $(ls mac-relay/FoloCodexRelay/Shared/*.swift) -o /tmp/ios-check \
+    -target arm64-apple-ios17.0 -sdk "$SDK" \
+    -framework CoreBluetooth -framework Foundation -framework Speech \
+    -framework AVFoundation -framework SwiftUI
+  ```
+
+- **Do not lift an app's internals into the framework.** Whether an app takes
+  user-visible parameters is that app's own design decision. Adding config
+  schemas, settings forms, or per-app fields to the `RemoteApp` protocol has
+  been explicitly rejected.
+- **Secrets never reach persistent storage in plaintext** — not the repository,
+  not logs (record key names, never values), and not `UserDefaults`, whose
+  backing plist is world-readable to any process running as the user. The
+  established precedent is the Wi-Fi password in `DeviceConfig.swift`: memory
+  only, never persisted, never logged.
+- **Only the foreground app may push a screen** (`RemoteAppHost` guards on
+  `current === app`). A background app that needs the user's attention calls
+  the injected `notify?(_:)`, which reaches the device through the `cmd.notify`
+  channel and draws a pinned card on `lv_layer_top()`.
+- Screen-text invariants: titles and single-line rows must be collapsed with
+  `DeviceText.fitOneLine`; one line budgets 26 half-widths (CJK counts as 2).
+- `RemoteAppHost` owns a serial queue; `@Published` may only be mutated on the
+  main thread.
+
+Build and install:
+
+```bash
+mac-relay/build.sh        # macOS app
+mac-relay/install-ios.sh  # iOS: generate project, sign, install, launch
+```
+
+## Device-side traps that cost real debugging time
+
+- **`LV_LABEL_LONG_DOT` does nothing without an explicit height.** Ellipsis is
+  applied only when the text is taller than the label; the default
+  `LV_SIZE_CONTENT` grows to fit, so the condition never holds.
+- **`lv_font_ui_cn_14.line_height` is 27, not 14.** Row-height arithmetic that
+  assumes the point size silently overlaps the footer.
+- **`cmd.*` config writes and BLE callbacks run on the NimBLE host task, which
+  does not hold the LVGL lock.** Copy the payload, set a flag, and let an
+  `lv_timer` do the drawing (`ui_statusbar.c` and `ui_notify.c` both do this).
+- **Rapid consecutive notifies exhaust the NimBLE mbuf pool** (`rc=6`,
+  `BLE_HS_ENOMEM`) and silently drop data. Batch, and retry on ENOMEM.
+- **`CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1`, and the device stops advertising once
+  connected.** While one endpoint holds the link, the other cannot even
+  discover the device.
+- **Manual `esp_light_sleep_start()` ignores power-management locks** and kills
+  BLE, Wi-Fi, and USB-CDC. Screen-off and light sleep are therefore separate
+  steps in `idle_sleep_check()`; only the second one requires that no radio
+  link exists.
+
+## Services (`services/`)
+
+`walkie-server` is a stateful Go WebSocket service: room membership and
+half-duplex floor control live in one process's memory (`rooms map[string]*room`
+behind a mutex). It is **not** a candidate for FaaS — independent function
+instances would each hold a disjoint set of rooms, so two clients could join
+"the same" room and never hear each other. A long-running container is the
+correct deployment target.
 
 ## Required validation and delivery
 

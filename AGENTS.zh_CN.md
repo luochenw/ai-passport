@@ -35,8 +35,70 @@
 | 项目开发完成 | `docs/development/release/project-completion.zh_CN.md`（再进入 `issue-suggestions` 或 `experience-pr` skill） |
 | 文档 | `docs/contribution/doc-conventions.zh_CN.md`、`docs/README.zh_CN.md` |
 | Commit 或 PR | `docs/contribution/commit-and-pr.zh_CN.md` |
+| 配套 app、设备应用、通知 | `mac-relay/FoloCodexRelay/Shared/RemoteApps.swift`、`main/remote_ui.h`、`main/ui_notify.h` |
 
 产品概览与文档索引见 `docs/README.zh_CN.md`。详细的 AI 开发工作流（上下文建立、事实来源优先级、应用/BSP 边界、运行时规则、素材放置、交付格式）见 `docs/development/ai-guide.zh_CN.md`。Fork 专用流程见 `docs/fork-guide.zh_CN.md`，普通上游开发无需读取。
+
+## 配套 app(`mac-relay/`)
+
+设备是**显示终端**:应用逻辑跑在 Mac/iPhone 上,通过 BLE 推"屏幕描述"文本。
+所谓"设备应用"是一个实现 `RemoteApp` 的 Swift 类型,不是固件。
+
+- **`Shared/` 必须能编 iOS。** 分目录的依据是**能力**,不是平台名。只有 iPhone
+  真的做不到的事(起子进程、读 `~/.codex/sessions`)才放 `macOS/`。验证:
+
+  ```bash
+  SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+  swiftc $(ls mac-relay/FoloCodexRelay/Shared/*.swift) -o /tmp/ios-check \
+    -target arm64-apple-ios17.0 -sdk "$SDK" \
+    -framework CoreBluetooth -framework Foundation -framework Speech \
+    -framework AVFoundation -framework SwiftUI
+  ```
+
+- **不要把应用的内部细节抬到框架层。** 一个应用要不要有用户可调的参数,是那个
+  应用自己的设计决定。往 `RemoteApp` 协议里加配置 schema、设置表单、每应用字段,
+  已经被明确否决过。
+- **凭据绝不以明文进入任何持久化存储** —— 不进仓库、不进日志(只记 key 名不记
+  值)、也不进 `UserDefaults`(它背后就是一个明文 plist,任何以你身份运行的进程
+  都能读)。既有先例是 `DeviceConfig.swift` 里的 Wi-Fi 密码:只放内存、不持久化、
+  不进日志。
+- **只有前台应用能推屏**(`RemoteAppHost` 用 `current === app` 拦着)。后台应用
+  要提示用户,调框架注入的 `notify?(_:)` —— 它经 `cmd.notify` 通道到设备,在
+  `lv_layer_top()` 上画一张钉住的卡片。
+- 屏幕文本约束:标题和单行内容必须经 `DeviceText.fitOneLine` 压成一行;一行的
+  预算是 26 个半角(CJK 算 2 个)。
+- `RemoteAppHost` 有自己的串行队列;`@Published` 只能在主线程改。
+
+构建与安装:
+
+```bash
+mac-relay/build.sh        # macOS app
+mac-relay/install-ios.sh  # iOS:生成工程、签名、装机、启动
+```
+
+## 设备侧那些真花过调试时间的坑
+
+- **`LV_LABEL_LONG_DOT` 不配固定高度等于没设。** 省略号只在文字高于标签时才出现,
+  而默认的 `LV_SIZE_CONTENT` 会长到刚好装下,条件永远不成立。
+- **`lv_font_ui_cn_14.line_height` 是 27,不是字号 14。** 按字号算行高会悄悄压到
+  页脚上。
+- **`cmd.*` 配置写入和 BLE 回调跑在 NimBLE host 任务上,那里不持有 LVGL 锁。**
+  正确做法是拷下内容、置个标志,由 `lv_timer` 去画(`ui_statusbar.c` 和
+  `ui_notify.c` 都是这么做的)。
+- **连续快速 notify 会打爆 NimBLE 的 mbuf 池**(`rc=6` / `BLE_HS_ENOMEM`),而且
+  是静默丢数据。要攒批,并在 ENOMEM 时重试。
+- **`CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1`,而且设备一旦连上就不再广播。**
+  一端占着链路时,另一端连发现都发现不了它。
+- **手动 `esp_light_sleep_start()` 不看任何 pm lock**,会直接掐断 BLE、Wi-Fi 和
+  USB-CDC。所以 `idle_sleep_check()` 里息屏和 light sleep 是分开的两步,只有第二步
+  才要求没有任何射频链路。
+
+## 服务(`services/`)
+
+`walkie-server` 是一个**有状态**的 Go WebSocket 服务:房间成员和半双工话权全部
+活在单个进程的内存里(`rooms map[string]*room` + 互斥锁)。它**不适合 FaaS** ——
+各个函数实例各持一份互不相干的房间表,两个人进"同一个"房间会永远听不到对方。
+正确的部署目标是长驻容器。
 
 ## 必须执行的验证与交付格式
 
