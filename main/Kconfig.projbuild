@@ -1,0 +1,40 @@
+menu "FoloToy AI Passport"
+
+    choice APP_VARIANT
+        prompt "应用变体"
+        default APP_VARIANT_LAUNCHER
+        help
+            这份代码可以构建出多个"应用"。它们共用同一套底座(常驻 BLE、
+            NVS 配置、界面组件、防砖机制),只是包含的页面不同。
+
+            启动器是长期留在 factory 分区的那一份,功能最全 —— 用户装坏了
+            任何应用、退回来都还是个完整可用的环境。其余变体是装进 appslot
+            的专用应用,只带自己需要的页面,因此体积更小、装机更快。
+
+            每个变体对应一个 sdkconfig.defaults.<名字>,用
+            tools/build_variant.sh <名字> 构建。
+
+        config APP_VARIANT_LAUNCHER
+            bool "启动器(全功能)"
+            help
+                Codex 会话浏览 + 应用商店 + 全部硬件演示页。
+                这是烧进 factory 的那一份。
+
+        config APP_VARIANT_DASHBOARD
+            bool "服务器面板"
+            help
+                服务器状态面板 + 应用商店 + 必要的设置页。砍掉 Codex 会话
+                浏览和大部分硬件演示页。
+    endchoice
+
+    config IDLE_SLEEP_TIMEOUT_SEC
+        int "菜单闲置自动休眠超时(秒)"
+        range 10 30
+        default 20
+        help
+            菜单界面闲置(无按键操作)超过这个时长后,自动关闭背光并进入
+            light sleep,靠 usb_keepalive_task 里每秒一次的定时轮询来判断
+            是否该唤醒(按键电压不再是松开态就唤醒)。仅在菜单界面生效,
+            演示页内(音频播放、Wi-Fi 扫描等)不会被打断。
+
+endmenu

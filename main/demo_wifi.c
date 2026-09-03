@@ -1,203 +1,121 @@
-// main/demo_wifi.c —— STA 模式扫描附近 AP，不连接网络、不保存凭证。
+// main/demo_wifi.c —— Wi-Fi 状态与扫描结果的**显示页**。
+//
+// ⚠ 这个文件以前自己拥有一整套 Wi-Fi 生命周期(create netif / wifi_init /
+// start / scan,退出时还 deinit + destroy_default_wifi)。那是错的:esp_netif
+// 和 esp_wifi 是进程级单例,而当时仓库里还有第二个模块(面板的数据层)也在
+// 做同样的事。两边各自的"初始化过了没"标志互相看不见,结果是
+//
+//   先看面板、再进这一页 → 这里无条件 esp_netif_create_default_wifi_sta()
+//   → 撞上已经存在的 if_key → IDF 内部 assert → **直接重启**
+//
+// 反过来先进这一页再看面板,这里退出时的 deinit 会把驱动从面板脚下抽走,
+// 而面板那边的总闸标志没有任何清零路径,只能重启恢复。
+//
+// 现在生命周期全部归 wifi_mgr 管(见 wifi_mgr.h),这个文件退化成一个纯粹的
+// 观察者:只读状态、只发起扫描,一行 esp_wifi_* 都不碰,更不负责关掉它。
 #include "demo.h"
-#include "demo_radio.h"
 #include "ui_pixel.h"
+#include "wifi_mgr.h"
 
-#include "esp_event.h"
-#include "esp_log.h"
-#include "esp_netif.h"
-#include "esp_wifi.h"
-#include "esp_wifi_default.h"
 #include "lvgl.h"
 #include <stdio.h>
 #include <string.h>
 
-static const char *TAG = "demo_wifi";
+#define WIFI_RESULT_COUNT 6   // 一屏能舒服地列出几条
 
-#define WIFI_RESULT_COUNT 5
-
-typedef enum {
-    WIFI_DEMO_OFF = 0,
-    WIFI_DEMO_STARTING,
-    WIFI_DEMO_SCANNING,
-    WIFI_DEMO_READY,
-    WIFI_DEMO_FAILED,
-} wifi_demo_state_t;
-
-static lv_obj_t *s_scr;
-static lv_obj_t *s_status;
-static lv_obj_t *s_results;
+static lv_obj_t   *s_scr;
+static lv_obj_t   *s_status;
+static lv_obj_t   *s_results;
 static lv_timer_t *s_timer;
-static esp_netif_t *s_sta_netif;
-static esp_event_handler_instance_t s_scan_handler;
-static volatile wifi_demo_state_t s_state;
-static volatile esp_err_t s_error;
-static bool s_wifi_initialized;
-static bool s_wifi_started;
-static bool s_handler_registered;
 
-static void scan_done(void *arg, esp_event_base_t base, int32_t id, void *data)
+// 上一次画出来的状态,用来避免每 200ms 重排一次整块文本。
+static wifi_mgr_state_t s_seen_state = (wifi_mgr_state_t)-1;
+static int              s_seen_count = -1;
+static bool             s_seen_busy;
+
+static void render(void)
 {
-    (void)arg;
-    (void)base;
-    (void)id;
-    (void)data;
-    if (s_state == WIFI_DEMO_SCANNING) s_state = WIFI_DEMO_READY;
-}
-
-static esp_err_t start_scan(void)
-{
-    if (!s_wifi_started) return ESP_ERR_INVALID_STATE;
-
-    esp_err_t err = esp_wifi_scan_start(NULL, false);
-    if (err == ESP_OK) {
-        s_state = WIFI_DEMO_SCANNING;
-    } else {
-        s_error = err;
-        s_state = WIFI_DEMO_FAILED;
+    switch (wifi_mgr_state()) {
+    case WIFI_MGR_OFF:
+        lv_label_set_text(s_status, "Wi-Fi 未启动\n按确定扫描附近网络");
+        break;
+    case WIFI_MGR_IDLE:
+        lv_label_set_text(s_status, wifi_mgr_scan_busy() ? "正在扫描…" : "未连接\n按确定重新扫描");
+        break;
+    case WIFI_MGR_CONNECTING:
+        lv_label_set_text(s_status, "正在连接…");
+        break;
+    case WIFI_MGR_CONNECTED: {
+        char buf[96];
+        snprintf(buf, sizeof(buf), "已连接 %s\n%s  %d dBm",
+                 wifi_mgr_ssid(), wifi_mgr_ip(), wifi_mgr_rssi());
+        lv_label_set_text(s_status, buf);
+        break;
     }
-    return err;
-}
-
-static esp_err_t wifi_start(void)
-{
-    s_state = WIFI_DEMO_STARTING;
-    esp_err_t err = demo_radio_nvs_prepare();
-    if (err != ESP_OK) goto fail;
-    err = demo_radio_network_prepare();
-    if (err != ESP_OK) goto fail;
-
-    s_sta_netif = esp_netif_create_default_wifi_sta();
-    if (!s_sta_netif) {
-        err = ESP_ERR_NO_MEM;
-        goto fail;
+    case WIFI_MGR_FAILED:
+        lv_label_set_text(s_status, "连接失败\n在电脑上检查密码后重试");
+        break;
     }
 
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    err = esp_wifi_init(&cfg);
-    if (err != ESP_OK) goto fail;
-    s_wifi_initialized = true;
-
-    err = esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_SCAN_DONE,
-                                              scan_done, NULL, &s_scan_handler);
-    if (err != ESP_OK) goto fail;
-    s_handler_registered = true;
-
-    err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
-    if (err != ESP_OK) goto fail;
-    err = esp_wifi_set_mode(WIFI_MODE_STA);
-    if (err != ESP_OK) goto fail;
-    err = esp_wifi_start();
-    if (err != ESP_OK) goto fail;
-    s_wifi_started = true;
-
-    return start_scan();
-
-fail:
-    s_error = err;
-    s_state = WIFI_DEMO_FAILED;
-    ESP_LOGE(TAG, "Wi-Fi 初始化失败: %s", esp_err_to_name(err));
-    return err;
-}
-
-static void show_scan_results(void)
-{
-    uint16_t total = 0;
-    uint16_t count = WIFI_RESULT_COUNT;
-    wifi_ap_record_t records[WIFI_RESULT_COUNT] = { 0 };
-    char text[320] = { 0 };
-    size_t used = 0;
-
-    esp_err_t err = esp_wifi_scan_get_ap_num(&total);
-    if (err == ESP_OK) err = esp_wifi_scan_get_ap_records(&count, records);
-    if (err != ESP_OK) {
-        s_error = err;
-        s_state = WIFI_DEMO_FAILED;
+    int n = wifi_mgr_scan_count();
+    if (n == 0) {
+        lv_label_set_text(s_results,
+            wifi_mgr_scan_busy() ? "" : "还没有扫描结果");
         return;
     }
 
-    for (uint16_t i = 0; i < count && used < sizeof(text); i++) {
-        int written = snprintf(text + used, sizeof(text) - used,
-                               "%d  %.18s  ch%u\n",
-                               records[i].rssi, (const char *)records[i].ssid,
-                               records[i].primary);
-        if (written < 0 || (size_t)written >= sizeof(text) - used) break;
-        used += (size_t)written;
+    // 一次拼好整块文本再设一次 label —— 逐行 set_text 会让这块区域重绘 n 次。
+    char list[WIFI_RESULT_COUNT * 40 + 1];
+    int off = 0;
+    for (int i = 0; i < n && i < WIFI_RESULT_COUNT; i++) {
+        wifi_mgr_ap_t ap;
+        if (!wifi_mgr_scan_entry(i, &ap)) break;
+        int w = snprintf(list + off, sizeof(list) - off, "%4d  %s%s\n",
+                         ap.rssi, ap.ssid, ap.secure ? "" : "  (开放)");
+        if (w < 0 || (size_t)w >= sizeof(list) - off) break;
+        off += w;
     }
-    if (count == 0) snprintf(text, sizeof(text), "No access points found");
-
-    lv_label_set_text_fmt(s_status, "%u APs  |  OK: RESCAN", total);
-    lv_label_set_text(s_results, text);
-    s_state = WIFI_DEMO_OFF;
+    list[off] = '\0';
+    lv_label_set_text(s_results, list);
 }
 
 static void tick(lv_timer_t *timer)
 {
     (void)timer;
-    switch (s_state) {
-    case WIFI_DEMO_STARTING:
-        lv_label_set_text(s_status, "Starting Wi-Fi...");
-        break;
-    case WIFI_DEMO_SCANNING:
-        lv_label_set_text(s_status, "Scanning 2.4 GHz...");
-        break;
-    case WIFI_DEMO_READY:
-        show_scan_results();
-        break;
-    case WIFI_DEMO_FAILED:
-        lv_label_set_text_fmt(s_status, "Wi-Fi failed: %s", esp_err_to_name(s_error));
-        s_state = WIFI_DEMO_OFF;
-        break;
-    default:
-        break;
-    }
-}
-
-static void wifi_stop(void)
-{
-    if (s_wifi_started) {
-        esp_wifi_scan_stop();
-        esp_wifi_stop();
-        s_wifi_started = false;
-    }
-    if (s_handler_registered) {
-        esp_event_handler_instance_unregister(WIFI_EVENT, WIFI_EVENT_SCAN_DONE,
-                                              s_scan_handler);
-        s_handler_registered = false;
-    }
-    if (s_wifi_initialized) {
-        esp_wifi_deinit();
-        s_wifi_initialized = false;
-    }
-    if (s_sta_netif) {
-        esp_netif_destroy_default_wifi(s_sta_netif);
-        s_sta_netif = NULL;
-    }
-    s_state = WIFI_DEMO_OFF;
+    // Wi-Fi 的状态变化来自另一个任务,这里轮询比让 wifi_mgr 的回调直接碰 LVGL
+    // 安全得多 —— 那个回调跑在 Wi-Fi 事件任务里,没有 LVGL 锁。
+    wifi_mgr_state_t st = wifi_mgr_state();
+    int  n    = wifi_mgr_scan_count();
+    bool busy = wifi_mgr_scan_busy();
+    if (st == s_seen_state && n == s_seen_count && busy == s_seen_busy) return;
+    s_seen_state = st;
+    s_seen_count = n;
+    s_seen_busy  = busy;
+    render();
 }
 
 void demo_wifi_enter(void)
 {
-    s_scr = ui_pixel_screen_create("WI-FI SCAN");
-    lv_obj_t *panel = ui_pixel_panel_create(s_scr, 12, 54, 216, 190, UI_PAPER);
+    s_scr = ui_pixel_screen_create("Wi-Fi");
+    lv_obj_t *panel = ui_pixel_panel_create(s_scr, 12, 20, 216, 190, UI_PAPER);
 
     s_status = lv_label_create(panel);
     lv_obj_set_width(s_status, 190);
-    lv_obj_set_style_text_color(s_status, lv_color_hex(UI_SKY_DARK), 0);
+    lv_label_set_long_mode(s_status, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(s_status, &lv_font_ui_cn_14, 0);
+    lv_obj_set_style_text_color(s_status, lv_color_hex(UI_ACCENT_DK), 0);
     lv_obj_align(s_status, LV_ALIGN_TOP_LEFT, 2, 2);
-    lv_label_set_text(s_status, "Starting Wi-Fi...");
 
     s_results = lv_label_create(panel);
     lv_obj_set_width(s_results, 190);
-    lv_obj_set_style_text_font(s_results, &lv_font_montserrat_14, 0);
+    lv_label_set_long_mode(s_results, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(s_results, &lv_font_ui_cn_14, 0);
     lv_obj_set_style_text_color(s_results, lv_color_hex(UI_INK), 0);
-    lv_obj_align(s_results, LV_ALIGN_TOP_LEFT, 2, 35);
-    lv_label_set_text(s_results, "RSSI  SSID  CHANNEL");
+    lv_obj_align(s_results, LV_ALIGN_TOP_LEFT, 2, 62);
 
-    ui_pixel_mascot_create(s_scr, 101, 246);
-    s_timer = lv_timer_create(tick, 100, NULL);
+    s_seen_state = (wifi_mgr_state_t)-1;   // 强制第一帧渲染
+    s_timer = lv_timer_create(tick, 200, NULL);
     lv_screen_load(s_scr);
-    wifi_start();
 }
 
 void demo_wifi_exit(void)
@@ -206,7 +124,8 @@ void demo_wifi_exit(void)
         lv_timer_delete(s_timer);
         s_timer = NULL;
     }
-    wifi_stop();
+    // ⚠ 刻意什么都不关。协议栈是 wifi_mgr 的,不是这一页的 —— 退出一个只读
+    // 页面就把整机的网络拆掉,正是本文件顶部说的那个事故。
     if (s_scr) {
         lv_obj_delete(s_scr);
         s_scr = NULL;
@@ -216,7 +135,7 @@ void demo_wifi_exit(void)
 
 void demo_wifi_key(bsp_btn_t btn, bsp_btn_ev_t ev)
 {
-    if (btn != BSP_BTN_OK || ev != BSP_BTN_CLICK || s_state != WIFI_DEMO_OFF) return;
-    lv_label_set_text(s_results, "RSSI  SSID  CHANNEL");
-    start_scan();
+    if (btn != BSP_BTN_OK || ev != BSP_BTN_CLICK) return;
+    if (wifi_mgr_scan_busy()) return;
+    wifi_mgr_scan_start();
 }

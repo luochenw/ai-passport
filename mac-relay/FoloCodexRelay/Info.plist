@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>FoloCodexRelay</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.folotoy.codexrelay</string>
+    <key>CFBundleExecutable</key>
+    <string>FoloCodexRelay</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>需要蓝牙权限来连接 FoloPassport 设备并转发 Codex 会话消息。</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>需要语音识别权限,把设备录制的语音转成文字后发送进 Codex。</string>
+
+    <!-- 远程应用要访问的是自家内网、用 IP 直连的私有服务(NAS 面板之类),
+         它们的证书必然是自签名的 —— 公共 CA 不可能给一个内网 IP 签发证书。
+
+         ATS 的默认策略要求完整可信的证书链,而且是在 URLSession 的
+         didReceive challenge 回调**之前**就拒绝,所以光在代码里放行
+         server trust 不够(实测:连接直接失败在 "A TLS error caused the
+         secure connection to fail",delegate 根本没被调到)。
+
+         ⚠ 打开这个开关意味着这些连接挡不住中间人。可以接受是因为:目标是
+         局域网内的私有服务,数据只读、只用来显示,设备不会因为它们做任何有
+         副作用的事。真要访问公网上的重要服务,应该改成固定那张自签名证书
+         (存下它的 SHA-256 逐次比对),而不是靠这个全局开关。 -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+</dict>
+</plist>

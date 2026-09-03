@@ -1,0 +1,7 @@
+[
+  {
+    "name": "最新固件",
+    "description": "当前可用的最新版本",
+    "bin": "current-firmware.bin"
+  }
+]

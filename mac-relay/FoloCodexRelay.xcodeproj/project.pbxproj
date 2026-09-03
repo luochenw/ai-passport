@@ -1,0 +1,299 @@
+// !$*UTF8*$!
+// 由 tools/gen_ios_project.py 生成,不要手工编辑 —— 重跑脚本即可。
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		5AB22901DF03D86D956B1721 /* AppCatalogSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C0F3A10A679A3D7E5852AE3 /* AppCatalogSource.swift */; };
+		C6BD8B8B957CB80DC83947D0 /* AppCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2E3F26A900E06F47760E52E /* AppCore.swift */; };
+		C26578760647A6686683BFAA /* AppStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95128EA007BC7F0328C0C449 /* AppStore.swift */; };
+		B213F1BCD9896A1057449186 /* BLERelay.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB5D19171ADAE4CE6412D7D9 /* BLERelay.swift */; };
+		41B1B35544700DEAE8ABC886 /* CodexApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC7068D827F121183A9A2F93 /* CodexApp.swift */; };
+		038B719F58AC3F2121C3E1B8 /* DashboardApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB2DDA06D94271A52CA67348 /* DashboardApp.swift */; };
+		08A7556B1FDF7260041FAFF2 /* DeviceConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB5544CA16CD1A1A52789345 /* DeviceConfig.swift */; };
+		9EC3DF3047056FA988DA662D /* IMAADPCM.swift in Sources */ = {isa = PBXBuildFile; fileRef = 593F608D0F468F902419F2EC /* IMAADPCM.swift */; };
+		A876F242BE5425DBB659C629 /* Logging.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6650DA0ABED18571A7317544 /* Logging.swift */; };
+		1F3A3EB2492B79A2AC84FACE /* Protocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1169000175CB15640341EFF4 /* Protocol.swift */; };
+		AA46F432507A666898E23304 /* RelayApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE8DA103969577510C0844D8 /* RelayApp.swift */; };
+		DE42ADE9E186ADF5CB2865EB /* RemoteApps.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB964059B2DD26BE7065C711 /* RemoteApps.swift */; };
+		17A00461F20B210A3F30463D /* SystemPushToTalk.swift in Sources */ = {isa = PBXBuildFile; fileRef = C238E010E64D29BE2B5A993D /* SystemPushToTalk.swift */; };
+		87D167A49F69787D5739B0CF /* VoiceInputPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = B55C789260B5DC66649C6D40 /* VoiceInputPipeline.swift */; };
+		97647568019045307F51CC6D /* WalkieClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADC7D6340163E407D9B9F696 /* WalkieClient.swift */; };
+		400E69432EB7B5DEF4D22B8F /* WalkieProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28812FC1114B852F7BCF1F2E /* WalkieProtocol.swift */; };
+		7B92C9D5AF9A38E6F06FFEBD /* WalkieTalkieApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B48A6184A20C917A57F510FB /* WalkieTalkieApp.swift */; };
+		C1C233F109CFE98C14A3E4E9 /* AppCatalog in Resources */ = {isa = PBXBuildFile; fileRef = 0D1258AFCC66518EBE29D534 /* AppCatalog */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		1C0F3A10A679A3D7E5852AE3 /* AppCatalogSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppCatalogSource.swift; sourceTree = "<group>"; };
+		F2E3F26A900E06F47760E52E /* AppCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppCore.swift; sourceTree = "<group>"; };
+		95128EA007BC7F0328C0C449 /* AppStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStore.swift; sourceTree = "<group>"; };
+		EB5D19171ADAE4CE6412D7D9 /* BLERelay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BLERelay.swift; sourceTree = "<group>"; };
+		CC7068D827F121183A9A2F93 /* CodexApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexApp.swift; sourceTree = "<group>"; };
+		FB2DDA06D94271A52CA67348 /* DashboardApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardApp.swift; sourceTree = "<group>"; };
+		BB5544CA16CD1A1A52789345 /* DeviceConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceConfig.swift; sourceTree = "<group>"; };
+		593F608D0F468F902419F2EC /* IMAADPCM.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IMAADPCM.swift; sourceTree = "<group>"; };
+		6650DA0ABED18571A7317544 /* Logging.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Logging.swift; sourceTree = "<group>"; };
+		1169000175CB15640341EFF4 /* Protocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Protocol.swift; sourceTree = "<group>"; };
+		BE8DA103969577510C0844D8 /* RelayApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayApp.swift; sourceTree = "<group>"; };
+		EB964059B2DD26BE7065C711 /* RemoteApps.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteApps.swift; sourceTree = "<group>"; };
+		C238E010E64D29BE2B5A993D /* SystemPushToTalk.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemPushToTalk.swift; sourceTree = "<group>"; };
+		B55C789260B5DC66649C6D40 /* VoiceInputPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceInputPipeline.swift; sourceTree = "<group>"; };
+		ADC7D6340163E407D9B9F696 /* WalkieClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalkieClient.swift; sourceTree = "<group>"; };
+		28812FC1114B852F7BCF1F2E /* WalkieProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalkieProtocol.swift; sourceTree = "<group>"; };
+		B48A6184A20C917A57F510FB /* WalkieTalkieApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalkieTalkieApp.swift; sourceTree = "<group>"; };
+		F5BF48AA40CAD7891EB709FC /* FoloCodexRelay.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FoloCodexRelay.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		0D1258AFCC66518EBE29D534 /* AppCatalog */ = {isa = PBXFileReference; lastKnownFileType = folder; name = AppCatalog; path = AppCatalog; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		2B731CEFC6751AAE0EC69B98 = {
+			isa = PBXGroup;
+			children = (
+				429461E971936A1CC87DA17D /* Shared */,
+				0D1258AFCC66518EBE29D534 /* AppCatalog */,
+				15AAFBE1AEAEDE226F6D2191 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		429461E971936A1CC87DA17D /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				1C0F3A10A679A3D7E5852AE3 /* AppCatalogSource.swift */,
+				F2E3F26A900E06F47760E52E /* AppCore.swift */,
+				95128EA007BC7F0328C0C449 /* AppStore.swift */,
+				EB5D19171ADAE4CE6412D7D9 /* BLERelay.swift */,
+				CC7068D827F121183A9A2F93 /* CodexApp.swift */,
+				FB2DDA06D94271A52CA67348 /* DashboardApp.swift */,
+				BB5544CA16CD1A1A52789345 /* DeviceConfig.swift */,
+				593F608D0F468F902419F2EC /* IMAADPCM.swift */,
+				6650DA0ABED18571A7317544 /* Logging.swift */,
+				1169000175CB15640341EFF4 /* Protocol.swift */,
+				BE8DA103969577510C0844D8 /* RelayApp.swift */,
+				EB964059B2DD26BE7065C711 /* RemoteApps.swift */,
+				C238E010E64D29BE2B5A993D /* SystemPushToTalk.swift */,
+				B55C789260B5DC66649C6D40 /* VoiceInputPipeline.swift */,
+				ADC7D6340163E407D9B9F696 /* WalkieClient.swift */,
+				28812FC1114B852F7BCF1F2E /* WalkieProtocol.swift */,
+				B48A6184A20C917A57F510FB /* WalkieTalkieApp.swift */,
+			);
+			path = FoloCodexRelay/Shared;
+			sourceTree = "<group>";
+		};
+		15AAFBE1AEAEDE226F6D2191 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				F5BF48AA40CAD7891EB709FC /* FoloCodexRelay.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		42AEFBAE01D2DFD981F7DA7D /* FoloCodexRelay */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B351D9E61CFAD9F667AA7583;
+			buildPhases = (
+				FCA229C23F166EBB0BA5029E,
+				059DB2086B49B680F85B3555,
+				B9C6EB6F79FC54535ACB3053,
+				BC4F0C97B0312FE4A9554C47,
+			);
+			buildRules = ();
+			dependencies = ();
+			name = FoloCodexRelay;
+			productName = FoloCodexRelay;
+			productReference = F5BF48AA40CAD7891EB709FC /* FoloCodexRelay.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		BC4F0C97B0312FE4A9554C47 /* 打包应用配置 */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = ();
+			inputPaths = ();
+			name = "打包应用配置";
+			outputPaths = ();
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "for f in \"$HOME\"/.folotoy/*.json; do\n  [ -e \"$f\" ] || continue\n  cp \"$f\" \"${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}/\"\n  echo \"\u5df2\u6253\u5305: $(basename \"$f\")\"\ndone";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXProject section */
+		46F86FAA6BBF9AC94A7E4595 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					42AEFBAE01D2DFD981F7DA7D = {
+						CreatedOnToolsVersion = 16.0;
+					};
+				};
+			};
+			buildConfigurationList = 200AD4F23452D049FE3D290D;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base);
+			mainGroup = 2B731CEFC6751AAE0EC69B98;
+			productRefGroup = 15AAFBE1AEAEDE226F6D2191 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				42AEFBAE01D2DFD981F7DA7D /* FoloCodexRelay */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		B9C6EB6F79FC54535ACB3053 = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C1C233F109CFE98C14A3E4E9 /* AppCatalog in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		FCA229C23F166EBB0BA5029E = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5AB22901DF03D86D956B1721 /* AppCatalogSource.swift in Sources */,
+				C6BD8B8B957CB80DC83947D0 /* AppCore.swift in Sources */,
+				C26578760647A6686683BFAA /* AppStore.swift in Sources */,
+				B213F1BCD9896A1057449186 /* BLERelay.swift in Sources */,
+				41B1B35544700DEAE8ABC886 /* CodexApp.swift in Sources */,
+				038B719F58AC3F2121C3E1B8 /* DashboardApp.swift in Sources */,
+				08A7556B1FDF7260041FAFF2 /* DeviceConfig.swift in Sources */,
+				9EC3DF3047056FA988DA662D /* IMAADPCM.swift in Sources */,
+				A876F242BE5425DBB659C629 /* Logging.swift in Sources */,
+				1F3A3EB2492B79A2AC84FACE /* Protocol.swift in Sources */,
+				AA46F432507A666898E23304 /* RelayApp.swift in Sources */,
+				DE42ADE9E186ADF5CB2865EB /* RemoteApps.swift in Sources */,
+				17A00461F20B210A3F30463D /* SystemPushToTalk.swift in Sources */,
+				87D167A49F69787D5739B0CF /* VoiceInputPipeline.swift in Sources */,
+				97647568019045307F51CC6D /* WalkieClient.swift in Sources */,
+				400E69432EB7B5DEF4D22B8F /* WalkieProtocol.swift in Sources */,
+				7B92C9D5AF9A38E6F06FFEBD /* WalkieTalkieApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		059DB2086B49B680F85B3555 = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		6F0B85FC643AF9C218F627EA /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		1B05A9D10F61E514E88AF240 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 5.0;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		D87348BDE86A31AE1A1C3907 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				APS_ENVIRONMENT = development;
+				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_ENTITLEMENTS = "FoloCodexRelay/FoloCodexRelay.entitlements";
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "FoloCodexRelay/Info-iOS.plist";
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.folotoy.codexrelay;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		024EEA213129F6CB818D8A64 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				APS_ENVIRONMENT = production;
+				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_ENTITLEMENTS = "FoloCodexRelay/FoloCodexRelay.entitlements";
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "FoloCodexRelay/Info-iOS.plist";
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.folotoy.codexrelay;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		200AD4F23452D049FE3D290D = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				6F0B85FC643AF9C218F627EA /* Debug */,
+				1B05A9D10F61E514E88AF240 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B351D9E61CFAD9F667AA7583 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D87348BDE86A31AE1A1C3907 /* Debug */,
+				024EEA213129F6CB818D8A64 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 46F86FAA6BBF9AC94A7E4595 /* Project object */;
+}

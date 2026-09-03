@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>FoloCodexRelay</string>
+    <key>CFBundleDisplayName</key>
+    <string>FoloToy</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.folotoy.codexrelay</string>
+    <key>CFBundleExecutable</key>
+    <string>FoloCodexRelay</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+
+    <!-- iOS 强制要求 CFBundleVersion(macOS 容忍它缺失)。缺了的话装机
+         和上架都会被直接拒绝。 -->
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <key>MinimumOSVersion</key>
+    <string>17.0</string>
+    <!-- 1=iPhone 2=iPad。同一份二进制两种都跑。 -->
+    <key>UIDeviceFamily</key>
+    <array>
+        <integer>1</integer>
+        <integer>2</integer>
+    </array>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <!-- 现代 iOS 要求有启动画面配置,空字典表示用系统默认。没有这一项
+         的话 app 会被强制跑在兼容模式下(黑边、非原生分辨率)。 -->
+    <key>UILaunchScreen</key>
+    <dict/>
+
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>需要蓝牙权限来连接 FoloPassport 设备并转发屏幕内容。</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>需要语音识别权限,把设备录制的语音转成文字。</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>对讲模式使用设备端麦克风，并由系统管理对讲音频会话。</string>
+
+    <!-- Push to Talk 要求声明麦克风用途。实际采集默认来自 Passport 的
+         ES8311 麦克风，iPhone 负责系统 PTT 会话、后台唤醒和网络中继。 -->
+
+    <!-- app 在后台要继续维持跟设备的连接。没有这一项的话,一切出 app
+         所有 BLE 活动立刻停止 —— 这是 iOS 上最关键的一条。 -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>bluetooth-central</string>
+        <string>push-to-talk</string>
+    </array>
+
+    <!-- 远程应用(服务器面板)要访问自家内网里用 IP 直连的私有服务。
+         iOS 14+ 对局域网访问单独要权限,不声明的话请求会被系统静默掐断,
+         错误长得跟"服务器没开机"一模一样,极难查。 -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>需要访问本地网络,才能读取局域网内的服务器面板数据显示到设备上。</string>
+
+    <!-- macOS 那份用的是全局 NSAllowsArbitraryLoads。这里收窄成只放行
+         局域网:内网自签证书的问题一样能解决,但公网连接仍然受 ATS 保护。 -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
+</dict>
+</plist>

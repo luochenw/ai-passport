@@ -16,7 +16,12 @@ typedef enum {
     BSP_BTN_PRESS = 0,   // 按下瞬间(低延迟,适合游戏类即时响应)
     BSP_BTN_CLICK,       // 单击(按下并抬起)
     BSP_BTN_DOUBLE,      // 双击
-    BSP_BTN_LONG,        // 长按
+    BSP_BTN_LONG,        // 长按开始
+    BSP_BTN_HOLD,        // 长按后按固定节拍持续触发
+    BSP_BTN_LONG_UP,     // 长按后松开(接 iot_button 的 BUTTON_LONG_PRESS_UP)。
+    BSP_BTN_RELEASE,     // 任意一次物理抬起(接 BUTTON_PRESS_UP),供实时 PTT 使用。
+                         // 追加在末尾,不要打乱前面几个已有值的数值/顺序 ——
+                         // 其它代码可能依赖这几个既有枚举值的具体数值。
 } bsp_btn_ev_t;
 
 // 按键事件回调。运行于 button 组件的定时器任务,勿在其中阻塞或做重活。

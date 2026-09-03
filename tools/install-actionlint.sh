@@ -49,12 +49,21 @@ if ! curl --fail --location --silent --show-error --retry 3 --retry-all-errors \
     gh release download "v${version}" --repo rhysd/actionlint \
         --pattern "${archive_name}" --dir "${destination}"
 fi
-if command -v sha256sum >/dev/null 2>&1; then
-    printf '%s  %s\n' "${checksum}" "${archive_path}" | sha256sum --check --status
-elif command -v shasum >/dev/null 2>&1; then
-    [[ "$(shasum -a 256 "${archive_path}" | awk '{print $1}')" == "${checksum}" ]]
+# 算出摘要再字符串比对,而不是用 `sha256sum --check`。macOS 自带
+# /sbin/sha256sum 是 BSD 风格的,不认 --check/--status:`command -v` 会判断
+# 成功、真正调用时却直接吐 usage 退出,于是整个静态检查在这一步就断掉,而且
+# 报错信息("usage: sha256sum ...")完全看不出跟 actionlint 有什么关系。
+# 两种实现的输出都是 "<摘要>  <文件名>",取第一列比对是跨平台都成立的写法。
+if command -v shasum >/dev/null 2>&1; then
+    actual_checksum="$(shasum -a 256 "${archive_path}" | awk '{print $1}')"
+elif command -v sha256sum >/dev/null 2>&1; then
+    actual_checksum="$(sha256sum "${archive_path}" | awk '{print $1}')"
 else
     echo "No SHA-256 verification tool is available" >&2
+    exit 1
+fi
+if [[ "${actual_checksum}" != "${checksum}" ]]; then
+    echo "actionlint checksum mismatch: expected ${checksum}, got ${actual_checksum}" >&2
     exit 1
 fi
 tar -xzf "${archive_path}" -C "${destination}" actionlint

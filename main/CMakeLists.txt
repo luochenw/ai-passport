@@ -1,6 +1,10 @@
 idf_component_register(
     SRCS "main.c"
+         "ui_font_cn_14.c"
+         "ui_font_cn_20.c"
          "ui_pixel.c"
+         "ui_statusbar.c"
+         "ui_notify.c"
          "ui_pixel_math.c"
          "demo_display.c"
          "demo_button.c"
@@ -10,6 +14,19 @@ idf_component_register(
          "demo_wifi.c"
          "demo_ble.c"
          "demo_low_power.c"
+         "demo_status.c"
+         "demo_codex.c"
+         "demo_appstore.c"
+         "appstore_transfer.c"
+         "ble_hub.c"
+         "remote_ui.c"
+         "demo_remote.c"
+         "device_config.c"
+         "wifi_mgr.c"
+         "boot_chime.c"
+         "walkie_codec.c"
+         "walkie_audio.c"
     INCLUDE_DIRS "."
-    REQUIRES bsp bt esp_event esp_hw_support esp_netif esp_timer esp_wifi nvs_flash
+    EMBED_FILES "../assets/music/boot_chime.pcm"
+    REQUIRES app_update bsp bt esp_driver_usb_serial_jtag esp_event esp_hw_support esp_netif esp_pm esp_timer esp_wifi nvs_flash spi_flash
 )
