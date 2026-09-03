@@ -175,7 +175,6 @@ final class AppCore {
         // 也会补发一次当前状态。
         remoteAppsModel = RemoteAppsModel(host: remoteHost)
 
-        remoteHost.register(DashboardApp())
         remoteHost.register(walkieApp)
 
         // Codex:macOS 上接真后端,别的平台注入 nil。

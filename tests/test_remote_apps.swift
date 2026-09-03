@@ -43,7 +43,7 @@ final class FakeApp: RemoteApp {
     let detail: String
     /// ⚠ 必须是这个类自己的成员,不能靠 RemoteApp 协议扩展里的默认实现:
     /// 协议扩展的默认实现是**静态派发**的,子类覆盖不了,通过协议类型调用时
-    /// 拿到的还是默认值。真实应用(DashboardApp / CodexApp)也是这么写的。
+    /// 拿到的还是默认值。真实应用(CodexApp 等)也是这么写的。
     let defaultIcon: String
     let settingsRoute: RemoteAppSettingsRoute?
     var requestPush: (() -> Void)?
