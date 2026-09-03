@@ -16,6 +16,8 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REL = "mac-relay"
+# 递归扫描:源码按「框架 / 能力 / 每个应用一个文件夹」分层放。
+# 加一个应用 = 新建一个文件夹,这个脚本不用改。
 SRC_DIR = "FoloCodexRelay/Shared"
 PROJ = os.path.join(ROOT, REL, "FoloCodexRelay.xcodeproj")
 
@@ -56,9 +58,19 @@ def main():
     src_abs = os.path.join(ROOT, REL, SRC_DIR)
     if not os.path.isdir(src_abs):
         sys.exit(f"找不到源码目录: {src_abs}")
-    sources = sorted(f for f in os.listdir(src_abs) if f.endswith(".swift"))
+    # ⚠ 递归 —— 源码是分层放的(Framework/ Capabilities/ Apps/<应用>/),
+    # 不是平铺。用 os.listdir 只会扫到零个文件,生成一个能打开但编不过的
+    # 工程:Xcode 不报"少了文件",只报几百条"cannot find X in scope"。
+    #
+    # pbxproj 里用**相对 SRC_DIR 的路径**当 file ref 的 path(带斜杠),
+    # 它相对所在 group 的 path 解析,所以不需要为每层建 PBXGroup。
+    sources = sorted(
+        os.path.relpath(os.path.join(dirpath, f), src_abs)
+        for dirpath, _dirs, files in os.walk(src_abs)
+        for f in files if f.endswith(".swift")
+    )
     if not sources:
-        sys.exit("Shared/ 下一个 .swift 都没有")
+        sys.exit(f"{SRC_DIR} 下一个 .swift 都没有")
 
     file_refs, build_files, src_children, phase_files = [], [], [], []
     for name in sources:
@@ -100,6 +112,7 @@ def main():
     #
     # 用 /bin/sh 写,不用 compgen(那是 bash 内建,Xcode 的脚本阶段默认 sh)。
     config_script = (
+        'rm -f \\"${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}/meal.json\\"\\n'
         'for f in \\"$HOME\\"/.folotoy/*.json; do\\n'
         '  [ -e \\"$f\\" ] || continue\\n'
         '  cp \\"$f\\" \\"${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}/\\"\\n'
@@ -179,7 +192,9 @@ def main():
 			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
 			files = ();
-			inputPaths = ();
+			inputPaths = (
+				"$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
+			);
 			name = "\u6253\u5305\u5e94\u7528\u914d\u7f6e";
 			outputPaths = ();
 			runOnlyForDeploymentPostprocessing = 0;
@@ -347,7 +362,7 @@ def main():
     with open(out, "w", encoding="utf-8") as f:
         f.write(text)
     print(f"生成完成: {out}")
-    print(f"  {len(sources)} 个源文件(只有 Shared/,macOS/ 不参与 iOS 构建)")
+    print(f"  {len(sources)} 个源文件(只有 Shared/ 及其子目录,macOS/ 不参与 iOS 构建)")
     print("  DEVELOPMENT_TEAM 不写入工程;真机构建时由 install-ios.sh 临时传入")
 
 

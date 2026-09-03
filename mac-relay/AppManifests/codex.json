@@ -1,0 +1,82 @@
+{
+  "id": "codex",
+  "name": "Codex",
+  "detail": "浏览会话,长按下键说话",
+  "icon": "",
+  "capability": "codex",
+  "keys": {
+    "up": {
+      "click": "up",
+      "hold": "up"
+    },
+    "down": {
+      "click": "down",
+      "hold": "down"
+    },
+    "ok": {
+      "click": "open",
+      "double": "back"
+    }
+  },
+  "screens": [
+    {
+      "id": "workspaces",
+      "title": "Codex 工作区",
+      "footer": "上/下选择  确定进入",
+      "rows": [
+        {
+          "list": {
+            "path": "workspaces",
+            "selected": "wsSel",
+            "empty": "{{status|default:没有找到工作区}}"
+          }
+        }
+      ]
+    },
+    {
+      "id": "sessions",
+      "title": "会话",
+      "footer": "确定打开  双击确定返回",
+      "rows": [
+        {
+          "list": {
+            "path": "sessions",
+            "selected": "sessSel",
+            "empty": "{{status|default:这个工作区没有会话}}"
+          }
+        }
+      ]
+    },
+    {
+      "id": "reading",
+      "title": "{{title}}",
+      "hint": "mic",
+      "footer": "上/下翻页  双击确定返回",
+      "rows": [
+        {
+          "when": {
+            "cond": "status",
+            "then": [
+              {
+                "text": "{{status}}"
+              }
+            ],
+            "else": [
+              {
+                "each": {
+                  "path": "lines",
+                  "limit": 12,
+                  "body": [
+                    {
+                      "text": "{{item}}"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

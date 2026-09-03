@@ -6,6 +6,27 @@
 
 ## Unreleased
 
+- The companion app now gives **every device a fully independent session**:
+  its own app instances, browsing position, installed list, device settings
+  (volume/brightness/status bar), and its own identity on the walkie server.
+  Several devices stay connected and usable at once; the device bar picks
+  which one the UI shows.
+  Fixed along the way: two devices sharing one walkie clientId were evicted by
+  the server and kicked each other every two seconds; firmware chunks sized
+  against the "active" device's MTU were silently dropped by CoreBluetooth;
+  plugging in a device without the meal app installed tore down another
+  device's meal connection and wiped its scheduled reminders; and "rescan" on
+  one device's config page undid another device's "disconnect".
+
+- Fixed iOS server-panel requests to self-signed HTTPS endpoints by pinning the
+  configured server certificate and limiting the transport exception to that
+  host. Dashboard network failures now report actionable URL error codes.
+
+- Added a weekly meal application (which restaurant it accepts is set by
+  `MEAL_BUILDING` at deploy time). It keeps weekly menu history, recommends a floor for lunch and dinner,
+  and broadcasts weekday reminders at 12:10 and 18:10 only to clients that have
+  installed the application.
+
 - Simplified the companion firmware panel to one bundled latest firmware and a
   single update action. Re-updating while the device is running from `appslot`
   now restarts through the factory launcher before safely rewriting `appslot`.

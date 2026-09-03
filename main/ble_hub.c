@@ -9,6 +9,7 @@
 #include "demo_radio.h"
 
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "host/ble_gap.h"
@@ -18,11 +19,51 @@
 #include "nimble/nimble_port_freertos.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
+#include <stdio.h>
 #include <string.h>
 
 static const char *TAG = "ble_hub";
-// 广播名跟改造之前保持一致 —— 配套 app 是按这个名字扫描的,改了就连不上。
-static const char *DEVICE_NAME = "FoloPassport";
+
+// 广播名 = 固定前缀 + 本机 MAC 后两字节,例如 "FoloPassport-A3F1"。
+//
+// 为什么要带后缀:三五台设备摆在一起时,如果都叫 "FoloPassport",配套 app
+// 的界面上就是几行一模一样的条目,用户分不清哪一行对应手边哪一台,连"我
+// 到底连上了哪个"都无从判断。
+//
+// 为什么用 MAC 而不是让用户起名:得先能区分,才谈得上起名。MAC 是出厂就
+// 唯一且不会变的,重刷固件、清 NVS 都不影响 —— 用户起的名字可以之后叠在
+// 这个稳定标识之上。
+//
+// ⚠ 配套 app 必须按**前缀**匹配,不能再按完整名字相等
+// (BLERelay.swift 的 didDiscover)。名字放在扫描响应包里,不占主广播包那
+// 31 字节的预算,加 5 个字符没有空间问题。
+#define DEVICE_NAME_PREFIX "FoloPassport"
+static char s_device_name[sizeof(DEVICE_NAME_PREFIX) + 6];
+
+static const char *device_name(void)
+{
+    if (s_device_name[0]) return s_device_name;
+    uint8_t mac[6] = { 0 };
+    // ⚠ 用 ESP_MAC_BASE,不是 ESP_MAC_BT。
+    //
+    // ESP32-C3 **没有经典蓝牙**,ESP_MAC_BT 在这颗芯片上取不到,而这个函数
+    // 的兜底分支会安静地退回裸前缀 —— 表现就是"改了代码但设备名还是老样子",
+    // 而且没有任何线索。ESP_MAC_BASE 是出厂烧进 efuse 的基础地址,任何 ESP
+    // 芯片都有。
+    esp_err_t err = esp_read_mac(mac, ESP_MAC_BASE);
+    if (err != ESP_OK) {
+        snprintf(s_device_name, sizeof(s_device_name), "%s", DEVICE_NAME_PREFIX);
+        ESP_LOGW(TAG, "读不到基础 MAC(%s),广播名退回 %s —— 多台设备将无法区分",
+                 esp_err_to_name(err), s_device_name);
+    } else {
+        snprintf(s_device_name, sizeof(s_device_name), "%s-%02X%02X",
+                 DEVICE_NAME_PREFIX, mac[4], mac[5]);
+    }
+    // 打出来:这是判断"多设备能不能区分"的唯一现场证据,不打的话只能靠
+    // 对端扫描结果反推。
+    ESP_LOGI(TAG, "广播名: %s", s_device_name);
+    return s_device_name;
+}
 
 // ⚠ 这两个上限满了之后是**静默忽略**:注册函数只打一条 ESP_LOGE 就返回,
 // 协议栈照常起来,症状是"对端怎么也发现不了这个新特征值",而日志早就滚过去
@@ -137,8 +178,8 @@ static int advertise(void)
     if (rc != 0) return rc;
 
     struct ble_hs_adv_fields response = { 0 };
-    response.name = (const uint8_t *)DEVICE_NAME;
-    response.name_len = strlen(DEVICE_NAME);
+    response.name = (const uint8_t *)device_name();
+    response.name_len = strlen(device_name());
     response.name_is_complete = 1;
     rc = ble_gap_adv_rsp_set_fields(&response);
     if (rc != 0) return rc;
@@ -240,7 +281,7 @@ void ble_hub_init(void)
 
     ble_svc_gap_init();
     ble_svc_gatt_init();
-    int rc = ble_svc_gap_device_name_set(DEVICE_NAME);
+    int rc = ble_svc_gap_device_name_set(device_name());
     for (int i = 0; rc == 0 && i < s_service_count; i++) {
         rc = ble_gatts_count_cfg(s_services[i]);
         if (rc == 0) rc = ble_gatts_add_svcs(s_services[i]);

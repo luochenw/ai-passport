@@ -1,4 +1,4 @@
-module github.com/FoloToy/ai-passport/services/walkie-server
+module github.com/FoloToy/ai-passport/services
 
 go 1.23
 

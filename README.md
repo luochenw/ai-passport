@@ -27,8 +27,10 @@ reports key events, and stays out of the way.
 An ESP32-C3 with 8 MB of flash and no PSRAM cannot hold many features at once,
 and every new one costs a firmware flash. Moving the logic to a machine that
 already has the network, the disk and the language runtimes means a new
-"device app" is a Swift type conforming to `RemoteApp` — no firmware change,
-no reflash, no partition budget.
+"device app" is a **JSON manifest** — screens, rows and key bindings as data,
+fetched from GitHub at launch — plus a small native **capability** for the part
+a manifest cannot describe (realtime audio, a subprocess, file polling). No
+firmware change, no reflash, no partition budget.
 
 The cost is honest and worth stating: **the device does nothing useful on its
 own.** Without a paired computer it shows a home screen and a status bar.
@@ -39,12 +41,15 @@ own.** Without a paired computer it shows a home screen and a status bar.
 | --- | --- |
 | `main/` | Firmware: BLE hub, remote-UI renderer, resident status bar, global notifications, Wi-Fi manager, OTA |
 | `mac-relay/` | Companion app (macOS + iOS, one SwiftUI target). `Shared/` compiles for both; `macOS/` holds what iOS genuinely cannot do |
-| `services/walkie-server/` | Go WebSocket server for the walkie-talkie: rooms, half-duplex floor control, realtime audio forwarding. In-memory, records nothing |
+| `services/walkie/` | Go WebSocket server for the walkie-talkie (:8787): rooms, half-duplex floor control, realtime audio forwarding. In-memory, records nothing |
+| `services/meal/` | Go service for the canteen menu (:8788): weekly menus, floor recommendation, scheduled reminders |
+| `mac-relay/AppManifests/` | The manifests themselves, plus `registry.json` — what the companion fetches and verifies by sha256 |
 | `skills/`, `docs/`, `AGENTS.md` | Conventions and traps, for humans and for AI assistants |
 
-Two applications ship as examples: a **Codex session browser** and a
-**LAN walkie-talkie** (device microphone and speaker, push-to-talk on the
-down key).
+Three applications ship as examples: a **Codex session browser**, a
+**LAN walkie-talkie** (device microphone and speaker, push-to-talk on the down
+key) and a **canteen menu**. All three are manifests — the native half of each
+is only what the manifest cannot express.
 
 ## Build
 
@@ -67,9 +72,12 @@ USB-CDC, and others).
 
 ## Status
 
-Firmware, both app targets and the Go service build clean, host tests pass, and
-the notification path is verified on hardware. The walkie-talkie has had less
-device time than the rest. iOS Push to Talk entitlements are **off by default**
+Firmware, both app targets and both Go services build clean, host tests pass,
+and the following are verified on hardware: four devices connected at once with
+one independent session each, walkie-talkie audio between them, and a firmware
+install over BLE (2 MB in 88 s). Manifests are fetched from GitHub at launch and
+verified by sha256 before they are cached; a failed fetch falls back to the
+built-in copy. iOS Push to Talk entitlements are **off by default**
 because free Apple developer accounts cannot sign them — set `WALKIE_PTT=1` if
 you have a paid team with Apple's PTT authorization.
 
@@ -82,13 +90,13 @@ a handful. `git blame` over the current tree tells the real story
 
 | Path | This repository | Upstream |
 | --- | ---: | ---: |
-| `main/` — firmware application layer | **7,113** | 930 |
-| `mac-relay/` — companion app | **6,628** | 0 |
-| `services/` — walkie-talkie server | **1,114** | 0 |
-| `tests/` | **683** | 83 |
-| `tools/` | 492 | 522 |
-| `components/` — board support | 45 | **936** |
-| `docs/` — hardware guides | 23 | **5,954** |
+| `main/` — firmware application layer | **7,203** | 952 |
+| `mac-relay/` — companion app | **10,186** | 0 |
+| `services/` — walkie-talkie and meal servers | **2,410** | 0 |
+| `tests/` | **1,184** | 83 |
+| `tools/` | **630** | 522 |
+| `components/` — board support | 44 | **953** |
+| `docs/` — hardware guides | 64 | **5,954** |
 
 What genuinely comes from [FoloToy/ai-passport](https://github.com/FoloToy/ai-passport):
 the board-support layer (pin map, bus setup, display and audio init) and the

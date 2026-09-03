@@ -43,7 +43,7 @@ final class FakeApp: RemoteApp {
     let detail: String
     /// ⚠ 必须是这个类自己的成员,不能靠 RemoteApp 协议扩展里的默认实现:
     /// 协议扩展的默认实现是**静态派发**的,子类覆盖不了,通过协议类型调用时
-    /// 拿到的还是默认值。真实应用(CodexApp 等)也是这么写的。
+    /// 拿到的还是默认值。真实应用(比如 CodexCapability)也是这么写的。
     let defaultIcon: String
     let settingsRoute: RemoteAppSettingsRoute?
     var requestPush: (() -> Void)?
@@ -170,13 +170,16 @@ struct TestRemoteApps {
             let h = makeHost("settings-route", c)
             h.register(FakeApp("面板"))
             h.register(FakeApp("对讲机", settingsRoute: .walkieTalkie))
+            h.register(FakeApp("吃饭", settingsRoute: .meal))
             h.waitForPendingWork()
 
             let panel = c.lists.last?.first { $0.name == "面板" }
             let walkie = c.lists.last?.first { $0.name == "对讲机" }
+            let meal = c.lists.last?.first { $0.name == "吃饭" }
             checkEqual(panel?.settingsRoute, nil, "普通应用不显示设置入口")
             checkEqual(walkie?.settingsRoute, .walkieTalkie,
                        "对讲机列表项携带设置路由")
+            checkEqual(meal?.settingsRoute, .meal, "吃饭列表项携带设置路由")
         }
 
         print("== 3. 首屏按下标打开的是已安装的那个 ==")
@@ -393,7 +396,14 @@ struct TestRemoteApps {
         do {
             // iOS 上没有 Codex 后端 —— 内核禁止 fork/exec,沙盒里也没有
             // ~/.codex/sessions。注入 nil 模拟。
-            let ios = CodexApp(browser: nil)
+            // ⚠ 用**仓库里真实那份** codex.json,不是测试自己捏一个。
+            // 捏一份就只能证明解释器работает,证明不了发出去的那份清单是对的 ——
+            // 而清单写错的表现恰恰是设备上某一行悄悄变空。
+            guard let codexManifest = ManifestStore.load("codex") else {
+                print("  ✗ 读不到 codex 清单"); exit(1)
+            }
+            let iosCap = CodexCapability(browser: nil)
+            let ios = ManifestApp(manifest: codexManifest, capability: iosCap)
             check(ios.unavailableReason != nil, "没有后端时,应用自己知道本端跑不了")
 
             // ⚠ 关键:setActive 之后 render() 必须出说明,不能挂在"正在读取…"。
@@ -410,7 +420,8 @@ struct TestRemoteApps {
                 func handleRequest(req: UInt8, a: UInt8, b: UInt8) { requests.append(req) }
             }
             let backend = FakeBackend()
-            let mac = CodexApp(browser: backend)
+            let mac = ManifestApp(manifest: codexManifest,
+                                  capability: CodexCapability(browser: backend))
             checkEqual(mac.unavailableReason, nil, "有后端时不声称跑不了")
             mac.setActive(true)
             checkEqual(backend.requests, [CmdReq.listWorkspaces], "有后端时照常去要工作区")

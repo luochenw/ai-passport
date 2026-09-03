@@ -267,6 +267,7 @@ enum RemoteButtonEvent: UInt8 {
 /// Names are user-facing copy and may change; the route is an app contract.
 enum RemoteAppSettingsRoute: String, Hashable {
     case walkieTalkie
+    case meal
 }
 
 protocol RemoteApp: AnyObject {
@@ -409,9 +410,20 @@ final class RemoteAppHost {
     private var lastNotifyAt = Date.distantPast
     private let queue = DispatchQueue(label: "com.folotoy.codexrelay.remoteapps")
 
-    private static let installedKey = "remote.installed"
-    /// 用户为某个应用挑的图标。存的是应用名 -> 字形。
-    private static let iconsKey = "remote.icons"
+    /// 单设备时代的键。新键在它后面加设备后缀;第一次用某台设备时从这里
+    /// 播种,老用户升级上来首屏不会突然变空。
+    private static let legacyInstalledKey = "remote.installed"
+    private static let legacyIconsKey = "remote.icons"
+    /// 这一台自己的键。
+    ///
+    /// ⚠ 清单必须**每台一份**。设备端 REMOTE_EVT_OPEN 报的是下标,而那个
+    /// 下标是设备用自己缓存的那份清单算出来的 —— 两台共用一份逻辑清单、
+    /// 却各自缓存的话,下标含义就可能对不上,点开的是另一个应用。
+    /// 每台各一份之后,发出去的和算下标用的是同一份,结构上不会错位。
+    /// 首屏槽位上限(maxInstalled,来自固件的 REMOTE_UI_MAX_APPS)也因此
+    /// 是按那一台自己的数量算的。
+    private let installedKey: String
+    private let iconsKey: String
 
     /// 已安装清单存哪儿。默认是 .standard;**测试传一个临时 suite 进来**,
     /// 否则宿主机测试会读写用户真实的安装状态 —— 跑一次测试就把人家装的应用
@@ -423,14 +435,22 @@ final class RemoteAppHost {
     init(send: @escaping (String) -> Void,
          sendManifest: @escaping (String) -> Void,
          sendNotify: @escaping (String) -> Void = { _ in },
+         deviceKey: String? = nil,
          defaults: UserDefaults = .standard,
          enableDebugChannel: Bool = true) {
         self.send = send
         self.sendManifest = sendManifest
         self.sendNotify = sendNotify
         self.defaults = defaults
-        self.installed = defaults.stringArray(forKey: Self.installedKey) ?? []
-        self.iconOverrides = defaults.dictionary(forKey: Self.iconsKey) as? [String: String] ?? [:]
+        let suffix = deviceKey.map { "." + $0 } ?? ""
+        self.installedKey = Self.legacyInstalledKey + suffix
+        self.iconsKey = Self.legacyIconsKey + suffix
+        // 这一台还没有自己的清单就从单设备时代那份播种 —— 升级上来的用户
+        // 第一次连上设备,首屏应该还是他原来那几个应用,不是一片空白。
+        self.installed = defaults.stringArray(forKey: installedKey)
+            ?? defaults.stringArray(forKey: Self.legacyInstalledKey) ?? []
+        self.iconOverrides = (defaults.dictionary(forKey: iconsKey) as? [String: String])
+            ?? (defaults.dictionary(forKey: Self.legacyIconsKey) as? [String: String]) ?? [:]
         if enableDebugChannel { pollDebugTrigger() }
     }
 
@@ -568,7 +588,7 @@ final class RemoteAppHost {
     func setIcon(_ glyph: String, for name: String) {
         queue.async {
             self.iconOverrides[name] = glyph
-            self.defaults.set(self.iconOverrides, forKey: Self.iconsKey)
+            self.defaults.set(self.iconOverrides, forKey: self.iconsKey)
             self.pushManifest()
             self.publishList()
         }
@@ -610,7 +630,7 @@ final class RemoteAppHost {
         } else {
             installed.removeAll { $0 == name }
         }
-        defaults.set(installed, forKey: Self.installedKey)
+        defaults.set(installed, forKey: installedKey)
         apps.first { $0.name == name }?.setInstalled(yes)
         pushManifest()
         publishList()
@@ -627,6 +647,14 @@ final class RemoteAppHost {
                 self.current?.setActive(false)
             }
         }
+    }
+
+    /// 重推一份清单,**不动**当前会话。
+    ///
+    /// 给"又一台设备上线了、它需要首屏"这种情况用:deviceReady() 会把当前
+    /// 会话重置回首屏,拿它来伺候第二台设备会把正在用第一台的人踢出应用。
+    func refreshManifest() {
+        queue.async { self.pushManifest() }
     }
 
     /// 设备就绪(订阅完成)。推一遍清单,让它的首屏立刻是最新的。
@@ -890,6 +918,9 @@ final class RemoteAppsModel: ObservableObject {
 
 struct RemoteAppsView: View {
     @ObservedObject var model: RemoteAppsModel
+    /// 打开某个应用的设置页。由外层的 NavigationStack 提供 —— 见 RelayApp
+    /// 里的说明:List 行里的 NavigationLink 在 macOS 上抢不到点击。
+    var onOpenSettings: ((RemoteAppSettingsRoute) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -951,23 +982,19 @@ struct RemoteAppsView: View {
                         .frame(width: 44)
                         .help("换一个在设备上显示的图标")
 
+                        appSummary(app)
+                        Spacer()
                         if let route = app.settingsRoute {
-                            NavigationLink(value: route) {
-                                HStack(spacing: 8) {
-                                    appSummary(app)
-                                    Spacer(minLength: 8)
-                                    Image(systemName: "gearshape")
-                                        .foregroundStyle(.secondary)
-                                }
-                                .contentShape(Rectangle())
+                            Button {
+                                onOpenSettings?(route)
+                            } label: {
+                                Image(systemName: "gearshape")
+                                    .foregroundStyle(.secondary)
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.borderless)
                             .help("打开\(app.name)设置")
                             .accessibilityLabel("\(app.name)，打开设置")
-                        } else {
-                            appSummary(app)
                         }
-                        Spacer()
                         // ⚠ 按钮的文字本身就是状态("卸载"=装了、"安装"=没装),
                         // 所以要真的不显示状态,按钮得跟着一起收起来 —— 只藏
                         // "已安装"那三个字是藏不住的。

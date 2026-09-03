@@ -100,7 +100,9 @@ components/bsp/include/  Public BSP APIs and bsp_pins.h hardware facts
 components/bsp/src/      Display, button, audio, battery, and shared-I2C implementations
 main/                    Minimal menu, LVGL UI, and independent hardware demo pages
 mac-relay/               Shared macOS/iOS companion app and BLE relay
-services/walkie-server/  Local realtime room relay with optional iOS PTT wake pushes
+services/walkie/        Local realtime room relay with optional iOS PTT wake pushes
+services/meal/          Weekly canteen menus, floor hints and mealtime reminders
+services/internal/wsx/  The little that both services genuinely share
 tests/                   Lightweight logic tests that can run without hardware
 tools/                   Shared local/CI validation and firmware verification scripts
 docs/                    Project docs, changelog, engineering/contribution rules, and design references
@@ -122,7 +124,8 @@ Repository documentation is organized by function area. `authoritative` document
 - [`docs/hardware-design/`](hardware-design/README.md) — board facts, constraints, acceptance matrix, and troubleshooting.
 - [`docs/reference/`](reference/README.md) — reference material: reusable development experience and archived application playbooks, grouped by contributor (`reference/<username>/`).
 - [`docs/brand/`](brand/README.md) — public brand and product language (`brand-and-product.md`) and the official product visual references.
-- [`services/walkie-server/`](../services/walkie-server/README.md) — local half-duplex audio relay and optional Apple Push to Talk wake configuration.
+- [`services/walkie/`](../services/walkie/README.md) — local half-duplex audio relay and optional Apple Push to Talk wake configuration.
+- [`services/meal/`](../services/meal/README.md) — weekly menus, floor recommendations and mealtime reminders. A separate binary on its own port: the two services share no state, and bundling them meant a menu-parser change restarted everyone's walkie.
 - [`docs/`](README.md) top-level — [`CHANGELOG.md`](CHANGELOG.md), [`brand-and-product.md`](brand/brand-and-product.md), and [`fork-guide.md`](fork-guide.md).
 
 GitHub community documents: [CONTRIBUTING.md](../.github/CONTRIBUTING.md), [CODE_OF_CONDUCT.md](../.github/CODE_OF_CONDUCT.md), [SECURITY.md](../.github/SECURITY.md), and [SUPPORT.md](../.github/SUPPORT.md).

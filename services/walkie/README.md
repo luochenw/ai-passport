@@ -2,7 +2,7 @@
   <a href="README.zh_CN.md">简体中文</a> · <strong>English</strong>
 </p>
 
-# Local Walkie-Talkie Server
+# Walkie service
 
 This service provides room membership, half-duplex floor control, realtime
 audio forwarding, and optional Apple Push to Talk wake notifications. It keeps
@@ -11,12 +11,20 @@ all state in memory and never records audio.
 ## Run
 
 ```bash
-cd services/walkie-server
+cd services/walkie
 go run . -listen 0.0.0.0:8787
+```
+
+On macOS, install the persistent local service with:
+
+```bash
+./install-macos.sh
 ```
 
 The companion app connects to `ws://<server-address>:8787/v1/ws`. Health checks
 are available at `/healthz`.
+
+Meals are a **separate service** — see [`services/meal/`](../meal/README.md).
 
 Set `WALKIE_SHARED_TOKEN` to require the same pre-shared token from every
 client. Do not place the token in this repository.

@@ -70,6 +70,51 @@ type conforming to `RemoteApp`, not firmware.
   `current === app`). A background app that needs the user's attention calls
   the injected `notify?(_:)`, which reaches the device through the `cmd.notify`
   channel and draws a pinned card on `lv_layer_top()`.
+- **Every device gets a fully independent `DeviceSession`** — its own
+  `RemoteAppHost`, its own freshly constructed app instances, its own browsing
+  position, and its own identity on the walkie server. Three connected devices
+  means three sessions all running; the UI merely **picks one to display**
+  (`SessionRouter.selectedID`). The test: anything describing *this device or
+  the person in front of it* belongs in `DeviceSession`; anything describing
+  *this Mac's radio, what this Mac has installed, or a once-per-system
+  resource* stays in `AppCore`.
+- **App instances cannot be shared across sessions.** `RemoteApp`'s
+  `requestPush` and `notify` are single-slot assignments, so a shared instance
+  lets the second host's injection **silently overwrite** the first: that app
+  on the first device stops pushing anything, with no error. The same trap bit
+  `MealClient.onSnapshot`, which is now multicast.
+- **Every relay callback carries a device id; every send takes an explicit
+  target.** Per-device callbacks (characteristic discovery, notifications,
+  write callbacks) must resolve `links[p.identifier]`. A set of `active?.xxx`
+  compatibility proxies used to live here and has been **deleted entirely**:
+  leave one behind and the next change quietly regresses to single-device, with
+  no compiler complaint — it builds, logs nothing, and only shows up with two
+  real devices.
+- **There is no "active device" in the relay any more.** `displayedID` only
+  paints the UI and takes part in no routing. The old `makeActive` stole focus
+  on any key press: a colleague pressing a button on device B yanked the window
+  you were looking at.
+- **Walkie identity must be per device.** The server evicts a same-`clientId`
+  connection in the same room (`services/walkie/main.go:296-308`), so
+  two devices sharing one id kick each other every two seconds.
+  `walkie.client-id.<deviceUUID>` / `walkie.name.<deviceUUID>` are per device;
+  server address, room and the keychain token stay **global** (the token is a
+  room password, compared once at join, `main.go:286`). The default nickname is
+  derived from the advertised name, or the roster shows two identical rows.
+- **⚠ Never broadcast a walkie CONTROL frame.** On the device `CONTROL_START`
+  means "*you* start transmitting" (`main/walkie_audio.c:261` sets
+  `s_tx_requested` and opens the mic), not "someone is speaking". Broadcasting
+  it opens every microphone in the room. The playback side needs no control
+  frame at all — `downlink_access_cb` plays whatever arrives.
+- **Do not loop A's uplink back to B locally.** Each device is its own client
+  on the server, which already relays A's speech to B (`main.go:464` excludes
+  only the speaker). A local loopback on top is double audio plus echo, and it
+  bypasses the server's floor arbitration — A's voice reaches B's speaker even
+  when A never got the floor.
+- **The installed-app list is per device** (`remote.installed.<deviceUUID>`,
+  seeded once from the single-device `remote.installed`). The device computes
+  `REMOTE_EVT_OPEN` indices from *its own cached copy*, so what we send and what
+  indices mean must be the same list, or a pick opens the wrong app.
 - Screen-text invariants: titles and single-line rows must be collapsed with
   `DeviceText.fitOneLine`; one line budgets 26 half-widths (CJK counts as 2).
 - `RemoteAppHost` owns a serial queue; `@Published` may only be mutated on the

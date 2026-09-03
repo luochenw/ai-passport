@@ -16,7 +16,7 @@ MODE="${1:---simulator}"
 # CodexBrowserModel 读 ~/.codex/sessions)在 iOS 上根本不成立 —— 前者被内核
 # 禁止,后者沙盒里没有那个目录。它们不参与 iOS 构建,而 Shared/ 里没有任何
 # 一处引用它们(CodexApp 通过 CodexBackend 协议解耦,iOS 上注入 nil)。
-SOURCES=$(ls FoloCodexRelay/Shared/*.swift)
+SOURCES=$(find FoloCodexRelay/Shared -name '*.swift' | sort)
 
 if [[ "$MODE" == "--device" ]]; then
     SDK=$(xcrun --sdk iphoneos --show-sdk-path)
@@ -42,7 +42,7 @@ swiftc $SOURCES \
     -sdk "$SDK" \
     -framework CoreBluetooth -framework Foundation \
     -framework Speech -framework AVFoundation \
-    -framework SwiftUI -framework PushToTalk
+    -framework SwiftUI -framework PushToTalk -framework UserNotifications
 
 mkdir -p "$APP/AppCatalog"
 cp -R AppCatalog/. "$APP/AppCatalog/" 2>/dev/null || true

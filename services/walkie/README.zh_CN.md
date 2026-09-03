@@ -2,7 +2,7 @@
   <strong>简体中文</strong> · <a href="README.md">English</a>
 </p>
 
-# 本地对讲服务
+# 对讲服务
 
 该服务负责房间成员管理、半双工占麦、实时音频转发，以及可选的 Apple Push to
 Talk 唤醒通知。所有状态只保存在内存中，服务不会录制音频。
@@ -10,11 +10,19 @@ Talk 唤醒通知。所有状态只保存在内存中，服务不会录制音频
 ## 运行
 
 ```bash
-cd services/walkie-server
+cd services/walkie
 go run . -listen 0.0.0.0:8787
 ```
 
+macOS 上可安装为登录后自动运行的本地常驻服务：
+
+```bash
+./install-macos.sh
+```
+
 伴侣应用连接 `ws://<服务器地址>:8787/v1/ws`，健康检查地址为 `/healthz`。
+
+吃饭是**另一个服务**，见 [`services/meal/`](../meal/README.zh_CN.md)。
 
 设置 `WALKIE_SHARED_TOKEN` 后，所有客户端必须提供相同的预共享口令。不要把
 真实口令写进仓库。

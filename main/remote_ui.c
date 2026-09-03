@@ -1,7 +1,7 @@
 // main/remote_ui.c —— 见 remote_ui.h 顶部对这套架构的说明。
 //
 // 这一层只做三件事:收屏幕描述、解析成结构体、把按键回传给对端。它不认识
-// 任何具体应用 —— "会话浏览器""待办列表"这些概念只存在于对端。
+// 任何具体应用 —— "服务器面板""待办列表"这些概念只存在于对端。
 #include "remote_ui.h"
 #include "ui_notify.h"
 #include "ble_hub.h"

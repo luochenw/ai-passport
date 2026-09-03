@@ -14,6 +14,11 @@ run_static_checks() {
 
     python3 tools/check_repo.py
 
+    # 应用目录必须和清单同步。对不上的后果是**静默**的:伴侣端拉下清单、
+    # 摘要不符、全部丢弃、退回内置版本 —— 屏幕上一切正常,只是"从网上更新
+    # 应用"这个功能悄悄不工作了。
+    python3 tools/gen_manifest_registry.py --check
+
     actionlint_bin="${ACTIONLINT_BIN:-}"
     if [[ -z "${actionlint_bin}" ]]; then
         actionlint_bin="$(command -v actionlint || true)"
@@ -35,9 +40,9 @@ run_static_checks() {
     "${test_dir}/test_walkie_codec"
 
     if command -v go >/dev/null 2>&1; then
-        (cd services/walkie-server && go test ./...)
+        (cd services && go test ./...)
     else
-        echo "跳过 walkie-server tests:本机没有 go"
+        echo "跳过 services 的 go test:本机没有 go"
     fi
 
     # 注:这里曾经有一个 dashboard_parse 的 JSON 解析回归测试。面板数据的获取
@@ -58,33 +63,82 @@ run_static_checks() {
     "${test_dir}/test_button_enum_sync"
     # 远程应用商店的逻辑(装 → 上首屏 → 商店不再列出 → 卸载)。这条链路的
     # 失败模式全是**静默**的:装了但清单没推出去、卸了设备首屏还留着、装到
-    # 第 9 个被悄悄丢掉 —— 真机上要一步步试才能发现。swiftc 只在 macOS 上有,
-    # Linux 的 CI 跳过这一项(那边的 static 档仍然跑其余全部检查)。
-    if command -v swiftc >/dev/null 2>&1; then
+    # 第 9 个被悄悄丢掉 —— 真机上要一步步试才能发现。
+    #
+    # ⚠ 判据是**平台**,不是"有没有 swiftc"。原来写的是 `command -v swiftc`,
+    # 注释里的理由是"swiftc 只在 macOS 上有" —— 这个前提不成立:GitHub 的
+    # Ubuntu runner 上有 swiftc,缺的是 SwiftUI(那是 Apple 平台独有的)。
+    # 于是 Linux CI 不但没跳过,还每次都在
+    #   RemoteApps.swift:2:8: error: no such module 'SwiftUI'
+    # 上挂掉。改成看 uname:Linux 上跳过,其余检查照跑。
+    if [[ "$(uname -s)" == "Darwin" ]] && command -v swiftc >/dev/null 2>&1; then
         # CodexApp + Protocol 也编进来:平台边界(本端跑不了的应用怎么表现)
         # 是这次三端改造的核心行为,而它的失败模式同样是静默的 —— 设备上
         # 点进去一片空白、或者"正在读取…"永远挂着。
         swiftc -o "${test_dir}/test_remote_apps" \
             tests/test_remote_apps.swift \
-            mac-relay/FoloCodexRelay/Shared/RemoteApps.swift \
-            mac-relay/FoloCodexRelay/Shared/CodexApp.swift \
-            mac-relay/FoloCodexRelay/Shared/Protocol.swift
+            mac-relay/FoloCodexRelay/Shared/Framework/RemoteApps.swift \
+            mac-relay/FoloCodexRelay/Shared/Apps/Codex/CodexCapability.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Protocol.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/AppOverlay.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Manifest/JSONValue.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Manifest/Template.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Manifest/AppManifest.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Manifest/AppCapability.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Manifest/ManifestApp.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Manifest/ManifestStore.swift
         # ⚠ 用隔离的 HOME 跑:配置层在 macOS 上会写 ~/.folotoy/<name>.json,
         # 拿真实家目录跑测试会污染(甚至覆盖)用户自己的配置。
         HOME="${test_dir}" "${test_dir}/test_remote_apps"
 
         swiftc -o "${test_dir}/test_walkie_protocol" \
             tests/test_walkie_protocol.swift \
-            mac-relay/FoloCodexRelay/Shared/WalkieProtocol.swift
+            mac-relay/FoloCodexRelay/Shared/Apps/Walkie/WalkieProtocol.swift
         "${test_dir}/test_walkie_protocol"
 
         swiftc -o "${test_dir}/test_walkie_client" \
             tests/test_walkie_client.swift \
-            mac-relay/FoloCodexRelay/Shared/WalkieClient.swift \
-            mac-relay/FoloCodexRelay/Shared/WalkieProtocol.swift
+            mac-relay/FoloCodexRelay/Shared/Apps/Walkie/WalkieClient.swift \
+            mac-relay/FoloCodexRelay/Shared/Apps/Walkie/WalkieProtocol.swift
         HOME="${test_dir}" "${test_dir}/test_walkie_client"
+
+        # 清单解释器:模板求值、条件、遍历、翻页、坏清单的容错。
+        # 这一层是"从 GitHub 更新应用"的执行入口 —— 它错了,错的方式是
+        # 设备上某一行悄悄变空,而不是任何人会看到的报错。
+        swiftc -o "${test_dir}/test_manifest" \
+            tests/test_manifest.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Manifest/JSONValue.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Manifest/Template.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Manifest/AppManifest.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Manifest/AppCapability.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Manifest/ManifestApp.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/AppOverlay.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/RemoteApps.swift \
+            mac-relay/FoloCodexRelay/Shared/Apps/Codex/CodexCapability.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Protocol.swift
+        "${test_dir}/test_manifest"
+
+        # 应用目录:从网上收下一份清单之前的那三个判断。这是整套"从 GitHub
+        # 更新应用"里唯一有安全后果的地方 —— 清单会被解释成设备上显示的
+        # 每一行字和每一个按键绑定,校验放松一点,后果不是崩溃,是设备
+        # 安静地按别人写的剧本工作。最后一组断言还把 Python 那边的生成器
+        # 和这边的验证器接在一起:两边只要有一边动了字节,当场失败。
+        swiftc -o "${test_dir}/test_app_registry" \
+            tests/test_app_registry.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Manifest/AppRegistry.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Manifest/AppManifest.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Manifest/ManifestStore.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Digest.swift
+        HOME="${test_dir}" "${test_dir}/test_app_registry"
+
+        swiftc -o "${test_dir}/test_meal_client" \
+            tests/test_meal_client.swift \
+            mac-relay/FoloCodexRelay/Shared/Apps/Meal/MealClient.swift \
+            mac-relay/FoloCodexRelay/Shared/Apps/Meal/MealProtocol.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/AppConfigStore.swift
+        HOME="${test_dir}" "${test_dir}/test_meal_client"
     else
-        echo "跳过 test_remote_apps:本机没有 swiftc"
+        echo "跳过 Swift 主机测试:非 macOS(SwiftUI 只在 Apple 平台上有)"
     fi
 
     python3 tests/test_verify_firmware.py

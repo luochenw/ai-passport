@@ -12,6 +12,10 @@ final class WalkieClient {
 
     private let queue = DispatchQueue(label: "com.folotoy.codexrelay.walkie")
     private let defaults: UserDefaults
+    /// 这个客户端属于哪一台设备。只用来给 UserDefaults 的键加后缀。
+    private let deviceKey: String
+    /// 这一台的口令在钥匙串里的账号名。
+    private let tokenAccount: String
 
     private var session: URLSession?
     private var socket: URLSessionWebSocketTask?
@@ -54,27 +58,56 @@ final class WalkieClient {
     var onInstalledChanged: ((Bool, String) -> Void)?
     var onRoomChanged: ((String) -> Void)?
 
-    init(defaults: UserDefaults = .standard) {
+    /// `deviceKey` 把身份按设备隔开。
+    ///
+    /// ⚠ 这不是可选的优化,是**不隔开就完全跑不起来**:服务端在同一房间里
+    /// 按 clientId 顶号(`services/walkie-server/main.go:296-308`,旧连接被
+    /// 关掉并附言 "replaced by restored connection"),而客户端两秒后重连又把
+    /// 对方踢掉 —— 两台设备会每两秒互踢一次,谁按住说话都会在几秒内掉线。
+    ///
+    /// 服务器/房间/口令**不**按设备分:口令是房间口令(`main.go:286` 只在
+    /// join 时比一次,所有客户端用同一个),按设备拆的话用户每选一台设备
+    /// 就得重填一次。昵称按设备分,否则房间名单里两行一模一样。
+    init(deviceKey: String, defaultName: String, defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        self.deviceKey = deviceKey
         #if os(macOS)
         let defaultServer = "ws://127.0.0.1:8787/v1/ws"
         #else
         let defaultServer = ""
         #endif
-        serverAddress = defaults.string(forKey: "walkie.server") ?? defaultServer
-        room = defaults.string(forKey: "walkie.room") ?? "local"
-        displayName = defaults.string(forKey: "walkie.name") ?? "Passport"
-        sharedToken = Self.loadToken()
-        if let stored = defaults.string(forKey: "walkie.client-id"), !stored.isEmpty {
+        serverAddress = defaults.string(forKey: "walkie.server." + deviceKey)
+            ?? defaults.string(forKey: "walkie.server") ?? defaultServer
+        room = defaults.string(forKey: "walkie.room." + deviceKey)
+            ?? defaults.string(forKey: "walkie.room") ?? "local"
+        // ⚠ 服务器地址 / 房间 / 口令 / 昵称**每台一份**。
+        //
+        // 它们描述的是"这一台设备接到哪儿、在哪个房间、叫什么" —— 是设备的
+        // 属性,不是这台电脑的。共用一份的话,把 A 换到另一个房间,B 会跟着
+        // 一起搬走,而用户以为自己只动了 A。
+        //
+        // 新设备从"上次保存的那份"播种(下面 configure 里会同步写回全局键),
+        // 所以插上第三台不用把服务器地址和口令重敲一遍。
+        let tokenAccount = Self.legacyTokenAccount + "." + deviceKey
+        self.tokenAccount = tokenAccount
+        displayName = defaults.string(forKey: "walkie.name." + deviceKey) ?? defaultName
+        var token = Self.loadToken(account: tokenAccount)
+        if token.isEmpty {
+            token = Self.loadToken(account: Self.legacyTokenAccount)
+            if !token.isEmpty { Self.storeToken(token, account: tokenAccount) }
+        }
+        sharedToken = token
+        let clientIDKey = "walkie.client-id." + deviceKey
+        if let stored = defaults.string(forKey: clientIDKey), !stored.isEmpty {
             clientID = stored
         } else {
             clientID = UUID().uuidString.lowercased()
-            defaults.set(clientID, forKey: "walkie.client-id")
+            defaults.set(clientID, forKey: clientIDKey)
         }
         // 迁移:把历史版本留在 UserDefaults 里的明文口令搬进钥匙串再删掉。
         // 不做的话,那份明文会一直躺在 plist 里,修了也白修。
         if let legacy = defaults.string(forKey: "walkie.token"), !legacy.isEmpty {
-            if sharedToken.isEmpty { sharedToken = legacy; Self.storeToken(legacy) }
+            if sharedToken.isEmpty { sharedToken = legacy; Self.storeToken(legacy, account: tokenAccount) }
             defaults.removeObject(forKey: "walkie.token")
             log("[walkie] 已把旧的明文口令迁进钥匙串并从 UserDefaults 删除")
         }
@@ -83,6 +116,9 @@ final class WalkieClient {
             .contains(Self.appName)
         snapshot.status = snapshot.installed ? "正在连接…" : "尚未启用"
     }
+
+    /// 这台设备在对讲服务器上的身份。同一房间里必须唯一 —— 服务端按它顶号。
+    func currentClientID() -> String { queue.sync { clientID } }
 
     func currentConfiguration() -> (server: String, room: String, name: String, token: String) {
         queue.sync { (serverAddress, room, displayName, sharedToken) }
@@ -118,13 +154,15 @@ final class WalkieClient {
     }
 
     private static let tokenService = "com.folotoy.codexrelay.walkie"
-    private static let tokenAccount = "shared-token"
+    /// 单设备时代的账号。每台设备自己的账号是 `shared-token.<设备key>`;
+    /// 第一次用某台设备时从这里播种,老用户不用重新输一遍口令。
+    private static let legacyTokenAccount = "shared-token"
 
-    private static func storeToken(_ value: String) {
+    private static func storeToken(_ value: String, account: String) {
         let base: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: tokenService,
-            kSecAttrAccount as String: tokenAccount,
+            kSecAttrAccount as String: account,
         ]
         SecItemDelete(base as CFDictionary)
         guard !value.isEmpty, let data = value.data(using: .utf8) else { return }
@@ -137,11 +175,11 @@ final class WalkieClient {
         if rc != errSecSuccess { log("[walkie] 口令写入钥匙串失败 status=\(rc)") }
     }
 
-    private static func loadToken() -> String {
+    private static func loadToken(account: String) -> String {
         let q: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: tokenService,
-            kSecAttrAccount as String: tokenAccount,
+            kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
@@ -158,10 +196,16 @@ final class WalkieClient {
             self.room = room.trimmingCharacters(in: .whitespacesAndNewlines)
             self.displayName = name.trimmingCharacters(in: .whitespacesAndNewlines)
             self.sharedToken = token
+            // 每台自己那份 —— 改 A 不会动 B。
+            self.defaults.set(self.serverAddress, forKey: "walkie.server." + self.deviceKey)
+            self.defaults.set(self.room, forKey: "walkie.room." + self.deviceKey)
+            self.defaults.set(self.displayName, forKey: "walkie.name." + self.deviceKey)
+            Self.storeToken(self.sharedToken, account: self.tokenAccount)
+            // 同时更新"新设备的默认值"。昵称不写:昵称必须每台不同,拿它当
+            // 默认值会让下一台一上来就跟这台重名。
             self.defaults.set(self.serverAddress, forKey: "walkie.server")
             self.defaults.set(self.room, forKey: "walkie.room")
-            self.defaults.set(self.displayName, forKey: "walkie.name")
-            Self.storeToken(self.sharedToken)
+            Self.storeToken(self.sharedToken, account: Self.legacyTokenAccount)
             self.snapshot.room = self.room
             self.publish()
             self.onRoomChanged?(self.room)

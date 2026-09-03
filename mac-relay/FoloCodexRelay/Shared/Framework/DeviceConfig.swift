@@ -68,20 +68,44 @@ final class DeviceConfigModel: ObservableObject {
     private var pendingScan: [WifiAP] = []
     private var collectingScan = false
 
+    /// 这一台自己的配置存在哪儿。
+    ///
+    /// ⚠ 音量、亮度、状态栏显示哪几项 —— 这些是**这一台设备**的设置,不是
+    /// 这台电脑的。以前存的是全局键(`cfg.volume` 之类),两台设备读到同一
+    /// 份:在 A 上把亮度调到 30,B 的滑块下次启动也变成 30,而 B 的屏幕
+    /// 其实还是 100。用户在两台设备之间来回改,永远调不对。
+    private let keyPrefix: String
+
+    private func key(_ name: String) -> String { name + keyPrefix }
+
+    /// 单设备时代用的是不带后缀的键。第一次用某台设备时从那里播种,
+    /// 老用户升级上来不会发现自己调好的音量亮度全部回到默认值。
     init(sender: @escaping ([(String, String)], @escaping (Bool) -> Void) -> Void,
          bleDisconnect: @escaping () -> Void = {},
-         bleRescan: @escaping () -> Void = {}) {
+         bleRescan: @escaping () -> Void = {},
+         deviceKey: String? = nil,
+         enableDebugChannel: Bool = true) {
         self.sender = sender
         self.bleDisconnect = bleDisconnect
         self.bleRescan = bleRescan
+        self.keyPrefix = deviceKey.map { "." + $0 } ?? ""
         let d = UserDefaults.standard
-        volume     = d.object(forKey: "cfg.volume")     as? Double ?? 60
-        brightness = d.object(forKey: "cfg.brightness") as? Double ?? 100
-        sbBattery  = d.object(forKey: "cfg.sb.battery") as? Bool ?? true
-        sbBle      = d.object(forKey: "cfg.sb.ble")     as? Bool ?? true
-        sbWifi     = d.object(forKey: "cfg.sb.wifi")    as? Bool ?? true
-        sbTime     = d.object(forKey: "cfg.sb.time")    as? Bool ?? true
-        pollDebugPush()
+        func dbl(_ name: String, _ fallback: Double) -> Double {
+            (d.object(forKey: name + keyPrefix) as? Double)
+                ?? (d.object(forKey: name) as? Double) ?? fallback
+        }
+        func bool(_ name: String, _ fallback: Bool) -> Bool {
+            (d.object(forKey: name + keyPrefix) as? Bool)
+                ?? (d.object(forKey: name) as? Bool) ?? fallback
+        }
+        volume     = dbl("cfg.volume", 60)
+        brightness = dbl("cfg.brightness", 100)
+        sbBattery  = bool("cfg.sb.battery", true)
+        sbBle      = bool("cfg.sb.ble", true)
+        sbWifi     = bool("cfg.sb.wifi", true)
+        sbTime     = bool("cfg.sb.time", true)
+        // 调试通道是文件轮询,每台各开一条会攒出一堆定时器抢同一个文件。
+        if enableDebugChannel { pollDebugPush() }
     }
 
     // MARK: 下发
@@ -101,12 +125,12 @@ final class DeviceConfigModel: ObservableObject {
     /// 下发设备侧配置。
     func pushDeviceSettings() {
         let d = UserDefaults.standard
-        d.set(volume, forKey: "cfg.volume")
-        d.set(brightness, forKey: "cfg.brightness")
-        d.set(sbBattery, forKey: "cfg.sb.battery")
-        d.set(sbBle, forKey: "cfg.sb.ble")
-        d.set(sbWifi, forKey: "cfg.sb.wifi")
-        d.set(sbTime, forKey: "cfg.sb.time")
+        d.set(volume, forKey: key("cfg.volume"))
+        d.set(brightness, forKey: key("cfg.brightness"))
+        d.set(sbBattery, forKey: key("cfg.sb.battery"))
+        d.set(sbBle, forKey: key("cfg.sb.ble"))
+        d.set(sbWifi, forKey: key("cfg.sb.wifi"))
+        d.set(sbTime, forKey: key("cfg.sb.time"))
 
         statusText = "正在下发到设备…"
         sender([("volume", String(Int(volume))),

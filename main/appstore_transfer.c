@@ -36,7 +36,6 @@
 #include <string.h>
 
 static const char *TAG = "appstore_transfer";
-static const char *DEVICE_NAME = "FoloPassport";   // 跟 demo_codex.c 同一个广播名
 
 // "应用商店"协议专用的 Service/Characteristic UUID,与 demo_codex.c 那一套
 // 完全独立(两边永远不会同时广播,但还是各给一套 UUID,避免混淆)。

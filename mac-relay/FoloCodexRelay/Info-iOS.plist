@@ -63,8 +63,9 @@
     <key>NSLocalNetworkUsageDescription</key>
     <string>需要访问本地网络,才能读取局域网内的服务器面板数据显示到设备上。</string>
 
-    <!-- macOS 那份用的是全局 NSAllowsArbitraryLoads。这里收窄成只放行
-         局域网:内网自签证书的问题一样能解决,但公网连接仍然受 ATS 保护。 -->
+    <!-- 自签名 HTTPS 的精确主机例外由构建脚本根据 dashboard.json 动态
+         写入产物,避免把私有服务器地址提交到仓库。运行时还会固定校验证书
+         SHA-256 指纹。 -->
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsLocalNetworking</key>
