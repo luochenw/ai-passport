@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 final class WalkieClient {
     typealias SnapshotHandler = (WalkieSnapshot) -> Void
@@ -25,6 +26,8 @@ final class WalkieClient {
     private var serverAddress: String
     private var room: String
     private var displayName: String
+    /// 服务端在 welcome 里分配给自己的 id。判断「在讲话的是不是我」只能靠它。
+    private var myClientId = ""
     private var sharedToken: String
     private var clientID: String
     private var pushToken = ""
@@ -61,12 +64,19 @@ final class WalkieClient {
         serverAddress = defaults.string(forKey: "walkie.server") ?? defaultServer
         room = defaults.string(forKey: "walkie.room") ?? "local"
         displayName = defaults.string(forKey: "walkie.name") ?? "Passport"
-        sharedToken = defaults.string(forKey: "walkie.token") ?? ""
+        sharedToken = Self.loadToken()
         if let stored = defaults.string(forKey: "walkie.client-id"), !stored.isEmpty {
             clientID = stored
         } else {
             clientID = UUID().uuidString.lowercased()
             defaults.set(clientID, forKey: "walkie.client-id")
+        }
+        // 迁移:把历史版本留在 UserDefaults 里的明文口令搬进钥匙串再删掉。
+        // 不做的话,那份明文会一直躺在 plist 里,修了也白修。
+        if let legacy = defaults.string(forKey: "walkie.token"), !legacy.isEmpty {
+            if sharedToken.isEmpty { sharedToken = legacy; Self.storeToken(legacy) }
+            defaults.removeObject(forKey: "walkie.token")
+            log("[walkie] 已把旧的明文口令迁进钥匙串并从 UserDefaults 删除")
         }
         snapshot.room = room
         snapshot.installed = (defaults.stringArray(forKey: Self.remoteInstalledKey) ?? [])
@@ -82,6 +92,66 @@ final class WalkieClient {
         queue.sync { snapshot }
     }
 
+    // MARK: 共享口令的存放
+    //
+    // 走钥匙串,**不进 UserDefaults**。UserDefaults 背后就是
+    // ~/Library/Preferences/<bundle id>.plist,任何以这个用户身份跑的进程
+    // 一条 `defaults read` 就能把口令原文打印出来;Time Machine 和 iPhone
+    // 未加密的本地备份里也是明文。同一个仓库对 Wi-Fi 密码的处理写在
+    // DeviceConfig.swift 里:只放内存、不写 UserDefaults、不进日志。
+    //
+    // 拿到这个口令的人可以用任意客户端加入同一个房间 —— 既能听到设备那头
+    // 推上来的实时音频,也能抢话权从设备喇叭里放声音,而设备屏幕上只会显示
+    // 「某某 正在讲话」,看不出是外人。
+    //
+    // 钥匙串不可用时**退回只放内存**(下次启动要重填),绝不落 UserDefaults。
+    /// 服务端的英文错误码直接上设备屏是没用的 —— 屏幕上蹦出一个
+    /// "unauthorized",用户不知道该去改哪一项设置。
+    private static func friendlyError(_ raw: String?) -> String {
+        switch (raw ?? "").lowercased() {
+        case "unauthorized":     return "共享口令不对"
+        case "room required":    return "房间名不能为空"
+        case "name required":    return "昵称不能为空"
+        case let m where m.isEmpty: return "服务返回错误"
+        default:                 return raw ?? "服务返回错误"
+        }
+    }
+
+    private static let tokenService = "com.folotoy.codexrelay.walkie"
+    private static let tokenAccount = "shared-token"
+
+    private static func storeToken(_ value: String) {
+        let base: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: tokenService,
+            kSecAttrAccount as String: tokenAccount,
+        ]
+        SecItemDelete(base as CFDictionary)
+        guard !value.isEmpty, let data = value.data(using: .utf8) else { return }
+        var add = base
+        add[kSecValueData as String] = data
+        // ThisDeviceOnly:不进 iCloud 钥匙串、也不会被备份带到别的设备上。
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        let rc = SecItemAdd(add as CFDictionary, nil)
+        // ⚠ 只记状态码,绝不记值。
+        if rc != errSecSuccess { log("[walkie] 口令写入钥匙串失败 status=\(rc)") }
+    }
+
+    private static func loadToken() -> String {
+        let q: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: tokenService,
+            kSecAttrAccount as String: tokenAccount,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data,
+              let s = String(data: data, encoding: .utf8) else { return "" }
+        return s
+    }
+
     func configure(server: String, room: String, name: String, token: String) {
         queue.async {
             self.serverAddress = server.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -91,7 +161,7 @@ final class WalkieClient {
             self.defaults.set(self.serverAddress, forKey: "walkie.server")
             self.defaults.set(self.room, forKey: "walkie.room")
             self.defaults.set(self.displayName, forKey: "walkie.name")
-            self.defaults.set(self.sharedToken, forKey: "walkie.token")
+            Self.storeToken(self.sharedToken)
             self.snapshot.room = self.room
             self.publish()
             self.onRoomChanged?(self.room)
@@ -509,7 +579,8 @@ final class WalkieClient {
         case .data(let frame):
             guard WalkieWire.validate(frame),
                   let stream = WalkieWire.streamID(in: frame),
-                  snapshot.speaker != displayName else { return }
+                  // 按 clientId 判断,不是显示名 —— 见 speakingIsSelf。
+                  !speakingIsSelf else { return }
             if frame[1] & WalkieWire.flagStart != 0 || remoteStream != stream {
                 deviceAudioQueue.removeAll()
             }
@@ -522,9 +593,25 @@ final class WalkieClient {
         }
     }
 
+    /// 当前在讲话的是不是我自己。
+    ///
+    /// **不要用显示名比。** 显示名可以重复,而默认值就是 "Passport" ——
+    /// 两台没改过昵称的设备进同一个房间,按名字比会把对方的声音当成自己的
+    /// 回声整帧丢掉,用户看着屏幕说有人在讲话、却一个字也听不到。
+    ///
+    /// 老服务端不回 clientId,那时只能退回按名字比:不比改之前更差,
+    /// 但也修不了重名。
+    private var speakingIsSelf: Bool {
+        if let sid = snapshot.speakerId, !sid.isEmpty, !myClientId.isEmpty {
+            return sid == myClientId
+        }
+        return snapshot.speaker == displayName
+    }
+
     private func handleServerEventLocked(_ event: WalkieServerEvent) {
         switch event.type {
         case "welcome":
+            myClientId = event.clientId ?? ""
             snapshot.connected = true
             snapshot.members = event.members ?? 1
             snapshot.status = "频道空闲"
@@ -544,10 +631,11 @@ final class WalkieClient {
             snapshot.members = event.members ?? snapshot.members
         case "speaker":
             snapshot.speaker = event.speaker
+            snapshot.speakerId = event.clientId
             remoteStream = event.stream
             snapshot.status = "\(event.speaker ?? "有人") 正在讲话"
             armReceiveTimeoutLocked(stream: event.stream ?? 0, after: 10)
-            if event.speaker != displayName {
+            if !speakingIsSelf {
                 DispatchQueue.main.async {
                     self.onRemoteSpeakerChanged?(event.speaker)
                 }
@@ -564,6 +652,7 @@ final class WalkieClient {
             activeStream = stream
             snapshot.transmitting = true
             snapshot.speaker = displayName
+            snapshot.speakerId = myClientId
             snapshot.status = "正在讲话"
             sendDeviceControl?(WalkieWire.controlStart, stream)
         case "floor_denied":
@@ -575,7 +664,7 @@ final class WalkieClient {
                 DispatchQueue.main.async { self.stopSystemTransmit?() }
             }
         case "idle":
-            if snapshot.speaker == displayName {
+            if speakingIsSelf {
                 sendDeviceControl?(WalkieWire.controlStop, 0)
                 pendingStream = nil
                 activeStream = nil
@@ -583,6 +672,7 @@ final class WalkieClient {
                 systemTransmitStarted = false
                 snapshot.transmitting = false
                 snapshot.speaker = nil
+                snapshot.speakerId = nil
                 snapshot.status = snapshot.connected ? "频道空闲" : "连接已断开"
                 if systemPTTAvailable?() == true {
                     DispatchQueue.main.async { self.stopSystemTransmit?() }
@@ -591,7 +681,13 @@ final class WalkieClient {
                 finishReceivingLocked(stream: remoteStream)
             }
         case "error":
-            snapshot.status = event.message ?? "服务返回错误"
+            // 服务端 join 失败只回一条 error、**不关连接**,而 WebSocket 握手
+            // 本身是成功的(socket 非 nil、心跳照跑),所以 connectLocked() 的
+            // `socket == nil` 前置条件会永远拦住重连 —— 口令填错一次就永久
+            // 卡死,重启设备也没用。这里主动断开,让既有的重连逻辑接手。
+            snapshot.status = Self.friendlyError(event.message)
+            snapshot.connected = false
+            disconnectLocked(reconnect: true)
         default:
             break
         }

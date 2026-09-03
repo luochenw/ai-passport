@@ -47,9 +47,13 @@ type serverEvent struct {
 	ClientID string `json:"clientId,omitempty"`
 	Room     string `json:"room,omitempty"`
 	Members  int    `json:"members,omitempty"`
-	Speaker  string `json:"speaker,omitempty"`
-	Stream   uint16 `json:"stream,omitempty"`
-	Message  string `json:"message,omitempty"`
+	// ⚠ speaker 事件必须同时带 ClientID。客户端要靠它判断「在讲话的是不是
+	// 我自己」—— 只发 name 的话,两个昵称相同的客户端(默认昵称就都是
+	// "Passport")会把对方的声音当成自己的回声丢掉,表现为屏幕显示有人在
+	// 讲话、却一个字也听不到。
+	Speaker string `json:"speaker,omitempty"`
+	Stream  uint16 `json:"stream,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 type outbound struct {
@@ -341,13 +345,14 @@ func (s *walkieServer) join(c *client, message controlMessage) error {
 	})
 	s.broadcastEvent(clients, serverEvent{Type: "members", Members: memberCount})
 	if speaker != nil {
-		s.sendRealtimeEvent(c, serverEvent{Type: "speaker", Speaker: speaker.name, Stream: stream})
+		s.sendRealtimeEvent(c, serverEvent{
+			Type: "speaker", ClientID: speaker.id, Speaker: speaker.name, Stream: stream})
 		for _, frame := range preRoll {
 			s.sendBinary(c, frame)
 		}
 	} else if replayAvailable {
 		s.sendRealtimeEvent(c, serverEvent{
-			Type: "speaker", Speaker: replaySpeaker, Stream: replayStream,
+			Type: "speaker", ClientID: replaySpeakerID, Speaker: replaySpeaker, Stream: replayStream,
 		})
 		for _, frame := range replayFrames {
 			s.sendBinary(c, frame)
@@ -403,7 +408,8 @@ func (s *walkieServer) requestFloor(c *client, stream uint16) {
 
 	s.sendEvent(c, serverEvent{Type: "floor_granted", Stream: stream})
 	for _, peer := range clients {
-		s.sendRealtimeEvent(peer, serverEvent{Type: "speaker", Speaker: c.name, Stream: stream})
+		s.sendRealtimeEvent(peer, serverEvent{
+			Type: "speaker", ClientID: c.id, Speaker: c.name, Stream: stream})
 	}
 	for _, deviceToken := range pushTokens {
 		go func(token string) {
@@ -718,6 +724,7 @@ func newPushSenderFromEnvironment() (pushSender, error) {
 func main() {
 	listen := flag.String("listen", "0.0.0.0:8787", "HTTP listen address")
 	statePath := flag.String("state", defaultStatePath(), "path for persisted PTT push tokens")
+	mealStatePath := flag.String("meal-state", defaultMealStatePath(), "path for weekly meal menus")
 	flag.Parse()
 
 	push, err := newPushSenderFromEnvironment()
@@ -725,10 +732,16 @@ func main() {
 		log.Fatal(err)
 	}
 	server := newWalkieServerWithState(os.Getenv("WALKIE_SHARED_TOKEN"), push, *statePath)
+	meals := newMealHub(*mealStatePath)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", server.handleHealth)
 	mux.HandleFunc("/v1/ws", server.handleWebSocket)
+	mux.HandleFunc("/v1/meals/ws", meals.handleWebSocket)
+	mux.HandleFunc("/v1/meals/current", meals.handleCurrent)
+	mux.HandleFunc("/v1/meals/weeks", meals.handleWeeks)
+	mux.HandleFunc("/v1/meals/update", meals.handleUpdate)
+	mux.HandleFunc("/v1/meals/remind", meals.handleRemind)
 
 	httpServer := &http.Server{
 		Addr:              *listen,

@@ -111,6 +111,10 @@ struct WalkieSnapshot: Equatable {
     var room = "local"
     var members = 0
     var speaker: String?
+    /// 正在讲话的那个人的 clientId。**判断「是不是我自己」要用它,不要用
+    /// speaker(显示名)** —— 显示名可以重复,默认还都是 "Passport"。
+    /// 老服务端不回这个字段,那时它是 nil。
+    var speakerId: String?
     var transmitting = false
     var status = "尚未启用"
 }
