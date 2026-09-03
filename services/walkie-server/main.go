@@ -724,7 +724,6 @@ func newPushSenderFromEnvironment() (pushSender, error) {
 func main() {
 	listen := flag.String("listen", "0.0.0.0:8787", "HTTP listen address")
 	statePath := flag.String("state", defaultStatePath(), "path for persisted PTT push tokens")
-	mealStatePath := flag.String("meal-state", defaultMealStatePath(), "path for weekly meal menus")
 	flag.Parse()
 
 	push, err := newPushSenderFromEnvironment()
@@ -732,16 +731,10 @@ func main() {
 		log.Fatal(err)
 	}
 	server := newWalkieServerWithState(os.Getenv("WALKIE_SHARED_TOKEN"), push, *statePath)
-	meals := newMealHub(*mealStatePath)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", server.handleHealth)
 	mux.HandleFunc("/v1/ws", server.handleWebSocket)
-	mux.HandleFunc("/v1/meals/ws", meals.handleWebSocket)
-	mux.HandleFunc("/v1/meals/current", meals.handleCurrent)
-	mux.HandleFunc("/v1/meals/weeks", meals.handleWeeks)
-	mux.HandleFunc("/v1/meals/update", meals.handleUpdate)
-	mux.HandleFunc("/v1/meals/remind", meals.handleRemind)
 
 	httpServer := &http.Server{
 		Addr:              *listen,
