@@ -96,9 +96,9 @@ final class WalkieTalkieApp: ObservableObject, RemoteApp {
         screen.text("在线  \(state.members) 人")
         screen.spacer()
         if state.transmitting {
-            screen.text("● 我正在讲话")
+            screen.text("• 我正在讲话")
         } else if let speaker = state.speaker {
-            screen.text("● \(speaker) 正在讲话")
+            screen.text("• \(speaker) 正在讲话")
         } else {
             screen.text(state.status)
         }

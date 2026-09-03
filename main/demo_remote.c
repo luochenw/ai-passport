@@ -4,6 +4,7 @@
 // 这个文件里没有任何"应用"的概念 —— 显示的是服务器面板还是待办列表,
 // 完全由对端决定,设备这边一视同仁。
 #include "demo.h"
+#include "walkie_audio.h"
 #include "remote_ui.h"
 #include "ble_hub.h"
 #include "ui_pixel.h"
@@ -70,13 +71,27 @@ static void render(void)
     // 否则是一句提示 —— 没有反馈的话,用户按住下键说完一句完全不知道设备到底
     // 有没有在听。
     if (scr.walkie) {
-        lv_obj_remove_flag(s_mic, LV_OBJ_FLAG_HIDDEN);
-        lv_label_set_text(s_mic, "按住下键讲话");
-        lv_obj_set_style_text_color(s_mic, lv_color_hex(UI_MUTED), 0);
+        // 只画**状态**,不画操作说明。
+        //
+        // 「按住下键讲话」这句是对讲机这个应用的交互说明,不是设备的状态,
+        // 而应用自己已经把它放进 footer 了(H 行)。这里再写死一份的后果是
+        // 底部连着两行一模一样的字;更糟的是服务没连上时应用把 footer 换成
+        // 「请在伴侣端检查服务」,这一行却还在说「按住下键讲话」—— 同一屏
+        // 给出两条互相矛盾的指示,用户照上面那行按,按了没反应。
+        //
+        // 这个文件开头就写着「没有任何『应用』的概念」,那就守住。
+        bool tx = walkie_audio_is_transmitting();
+        if (tx) {
+            lv_obj_remove_flag(s_mic, LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(s_mic, "• 正在讲话");
+            lv_obj_set_style_text_color(s_mic, lv_color_hex(UI_RED), 0);
+        } else {
+            lv_obj_add_flag(s_mic, LV_OBJ_FLAG_HIDDEN);
+        }
     } else if (scr.mic) {
         lv_obj_remove_flag(s_mic, LV_OBJ_FLAG_HIDDEN);
         bool rec = codex_voice_active();
-        lv_label_set_text(s_mic, rec ? "● 正在录音…" : "长按下键说话");
+        lv_label_set_text(s_mic, rec ? "• 正在录音…" : "长按下键说话");
         lv_obj_set_style_text_color(s_mic, lv_color_hex(rec ? UI_RED : UI_MUTED), 0);
     } else {
         lv_obj_add_flag(s_mic, LV_OBJ_FLAG_HIDDEN);
@@ -198,6 +213,10 @@ void demo_remote_enter(void)
     lv_obj_set_style_text_align(s_footer, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(s_footer, LV_ALIGN_BOTTOM_MID, 0, -8);
 
+// ⚠ 用 • (U+2022) 而不是 ● (U+25CF):lv_font_ui_cn_14 的码位区间是
+// 0x20-0x7e / 0x2002-0x2051 / 0x3000-0x303f / CJK / 全角,**不含几何图形块**
+// (0x25A0-0x25FF)。用 ● 的话 LVGL 画一个空心方框,而且那个占位框宽
+// line_height/2+2 ≈ 2 个半角,比端侧 DeviceText.width() 按 1 格算的预算还宽。
     s_mic = ui_pixel_label(s_scr, "", &lv_font_ui_cn_14, UI_MUTED);
     lv_obj_set_width(s_mic, ROW_W);
     lv_label_set_long_mode(s_mic, LV_LABEL_LONG_DOT);

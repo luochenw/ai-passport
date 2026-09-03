@@ -60,6 +60,9 @@ static uint16_t s_uplink_handle;
 static uint16_t s_status_handle;
 static QueueHandle_t s_rx_queue;
 static TaskHandle_t s_worker_task;
+// 单次发话的硬上限,见下面循环里的说明。
+#define WALKIE_TX_MAX_US (60 * 1000000LL)
+
 static volatile bool s_tx_requested;
 static volatile bool s_tx_active;
 static volatile bool s_rx_active;
@@ -133,7 +136,21 @@ static void record_session(void)
     ble_hub_request_fast_interval(true);
     send_status(WALKIE_STATUS_TX_STARTED, 0);
 
+    // 硬上限。s_tx_requested 只有两条清除路径:对端写 CONTROL STOP,和 BLE
+    // 断开。而 STOP 依赖「设备 RELEASE 事件 → indicate 上报 → 伴侣端 endTalk
+    // → 写回 STOP」整整一圈,这一圈中间任何一环断掉(伴侣端 app 被杀、页面
+    // 被通知卡片顶掉、indicate 丢包),麦克风就会**一直开着往房间广播**,而
+    // 屏幕上还停在「正在讲话」,用户没有任何线索。
+    //
+    // 一句话说完几秒钟,60 秒是个正常人说不完、又不会打断正常使用的界限。
+    // 到点就当作对端已经没了,自己收尾。
+    const int64_t deadline = esp_timer_get_time() + WALKIE_TX_MAX_US;
     while (s_tx_requested && ble_hub_is_connected()) {
+        if (esp_timer_get_time() > deadline) {
+            ESP_LOGW(TAG, "发话超过 %d 秒仍未收到停止,自行结束(防止麦克风一直开着)",
+                     (int)(WALKIE_TX_MAX_US / 1000000));
+            break;
+        }
         if (bsp_audio_read(s_pcm, sizeof(s_pcm)) != ESP_OK) {
             ESP_LOGW(TAG, "读取对讲麦克风失败");
             break;
