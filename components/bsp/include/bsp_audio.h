@@ -3,6 +3,7 @@
 #pragma once
 
 #include "esp_err.h"
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -20,5 +21,12 @@ esp_err_t bsp_audio_set_format(uint32_t hz, uint8_t bits, uint8_t ch);
 esp_err_t bsp_audio_write(const void *pcm, size_t bytes);
 esp_err_t bsp_audio_read(void *pcm, size_t bytes);
 
-// 输出音量 0..100(%)。
+// 输出音量 0..100(%)。多调用音频会话中应由持有 session lock 的调用方设置;
+// 独立配置任务必须先 acquire,避免与格式切换/流式收发并发访问 codec。
 void bsp_audio_set_volume(uint8_t percent);
+
+// Claim the codec for a multi-call session such as streaming capture or
+// playback. The caller must release it. This keeps page demos, the boot chime,
+// Codex dictation, and walkie-talkie audio from reconfiguring I2S concurrently.
+bool bsp_audio_acquire(uint32_t timeout_ms);
+void bsp_audio_release(void);

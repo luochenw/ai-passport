@@ -3,4 +3,10 @@ nvs,      data, nvs,     0x9000,   0x6000,
 phy_init, data, phy,     0xf000,   0x1000,
 factory,  app,  factory, 0x10000,  0x300000,
 cardid,   data, nvs,     0x356000, 0x4000,
+# bootflag/appslot 是这个项目自己的"应用商店"OTA 机制,落在 cardid 结束
+# (0x35a000)和 recovery 起始(0x700000)之间那段完全空闲的区域里,不影响
+# ble-recovery-compatibility.md 里对 factory/cardid/recovery 三个分区的强制约束。
+bootflag, data, 0x40,    0x35a000, 0x1000,
+# app 类型分区必须 64KB(0x10000)对齐,0x35b000 不是,往后挪到下一个对齐点。
+appslot,  app,  ota_0,   0x360000, 0x3a0000,
 recovery, app,  test,    0x700000, 0x100000,

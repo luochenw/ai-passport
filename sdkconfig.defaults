@@ -31,12 +31,26 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 CONFIG_LV_COLOR_DEPTH_16=y
 CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_SOURCE_HAN_SANS_SC_14_CJK=y
+CONFIG_LV_FONT_DEFAULT_SOURCE_HAN_SANS_SC_14_CJK=y
+CONFIG_LV_FONT_FMT_TXT_LARGE=y
+CONFIG_LV_USE_FONT_COMPRESSED=y
+
+# --- 按键:长按 500ms 后开始,按住每 100ms 滚动一格 ---
+CONFIG_BUTTON_LONG_PRESS_TIME_MS=500
+CONFIG_BUTTON_LONG_PRESS_HOLD_SERIAL_TIME_MS=100
 # LVGL 内置 malloc 池大小(KB)。它是独立静态区、不与系统堆共享,配大了会白白占用 RAM。
 # 本 demo UI 简单,24KB 足够;若自建复杂界面出现绘制卡死/看门狗,调大此值。
 CONFIG_LV_MEM_SIZE_KILOBYTES=24
 
 # --- 系统 ---
 CONFIG_FREERTOS_HZ=1000
+
+# --- 电源管理:动态调频 + light sleep(main.c 里 esp_pm_configure 用到)---
+# ⚠ light sleep 必须等全部外设初始化完、usb_keepalive_task 也已持锁才打开,
+# 原因和顺序见 main.c 里 app_main() 末尾的注释。
+CONFIG_PM_ENABLE=y
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
 
 # --- Bluetooth LE / NimBLE ---
 # ESP32-C3 仅支持 BLE；示例只启用单连接 peripheral 所需的最小 host 配置。
@@ -47,5 +61,13 @@ CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
 CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
 CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=256
 CONFIG_BT_NIMBLE_HOST_BASED_PRIVACY=n
 CONFIG_BT_NIMBLE_NVS_PERSIST=n
+
+# 面板应用要访问自签名证书的私有服务(家里的 NAS,直接用 IP 访问,不可能有
+# 公共 CA 签发的证书)。这两项让 esp-tls 允许"跳过服务端证书校验"这个选项
+# 存在 —— 注意只是让选项可用,是否真的跳过由每次请求自己决定
+# (见 main/dashboard_client.c 里 skip_cert_common_name_check 的说明和取舍)。
+CONFIG_ESP_TLS_INSECURE=y
+CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y

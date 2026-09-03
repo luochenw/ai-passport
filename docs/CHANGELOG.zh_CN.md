@@ -6,6 +6,13 @@
 
 ## Unreleased
 
+- 将伴侣端固件页精简为一个内置最新固件和一个更新按钮；设备正在从 `appslot`
+  运行时再次更新，会先自动重启回 factory 启动器，再安全覆写 `appslot`。
+
+- 新增本地优先的对讲机应用，包括半双工房间占麦、实时 BLE 音频传输、本地
+  WebSocket 中继，以及用于受支持后台和锁屏接收场景的 iOS Push to Talk 集成。
+  伴侣端从“应用”列表中的“对讲机”进入设置，不再占用独立一级标签。
+
 - 加入厂家为优特利 520mAh 电芯生成的 80 字节 CW2017 profile，并实现内容与更新标志检查、写入后校验、规定的重启时序以及有上限的 SOC 就绪等待。
 
 - 按功能域整理文档并采用双入口：根目录 `AGENTS.md` 变为薄路由（只保留硬约束与任务路由），详细的 AI 开发工作流下沉到 `docs/development/ai-guide.md`，`agent-guide.md` 并入其中。为 `docs/development/` 增加二级分区（`engineering/`、`ci/`、`release/`），把 `plays/` 应用档案与 `experiences/` 移入带专属 README 的 `docs/reference/` 参考区；删除 `docs/software-design/`（空脚手架）；把 `assets/{fonts,images,music}/README` 三个叶子 README 并入 `assets/` README；把 `project-completion` 的六个子文档压平为单文件；并把每个目录统一为单一 README，消除所有 `INDEX` 文件与一处重复经验索引。所有交叉引用与文献链接已更新；未丢弃任何内容。

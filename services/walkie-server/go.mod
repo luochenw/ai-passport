@@ -1,0 +1,14 @@
+module github.com/FoloToy/ai-passport/services/walkie-server
+
+go 1.23
+
+require (
+	github.com/coder/websocket v1.8.15
+	github.com/sideshow/apns2 v0.25.0
+)
+
+require (
+	github.com/golang-jwt/jwt/v4 v4.4.1 // indirect
+	golang.org/x/net v0.0.0-20220403103023-749bd193bc2b // indirect
+	golang.org/x/text v0.3.7 // indirect
+)

@@ -3,6 +3,7 @@
 #include "demo.h"
 #include "bsp_display.h"
 #include "ui_pixel.h"
+#include "driver/usb_serial_jtag.h"
 
 #include "esp_attr.h"
 #include "esp_log.h"
@@ -29,7 +30,6 @@ typedef enum {
 static lv_obj_t *s_scr;
 static lv_obj_t *s_status;
 static lv_obj_t *s_mode_cards[2];
-static lv_obj_t *s_mascot;
 static TaskHandle_t s_task;
 static volatile bool s_busy;
 static int s_selected;
@@ -58,9 +58,14 @@ static void sleep_task(void *arg)
         xTaskNotifyWait(0, UINT32_MAX, &command, portMAX_DELAY);
         if (!s_scr) continue;
 
+        if (usb_serial_jtag_is_connected()) {
+            set_status("USB 已连接\n已阻止休眠");
+            continue;
+        }
+
         s_busy = true;
         if (command == SLEEP_COMMAND_DEEP) {
-            set_status("DEEP SLEEP: 5 SEC\nApplication will restart");
+            set_status("深度休眠 5 秒\n应用将重启");
             vTaskDelay(pdMS_TO_TICKS(250));
             esp_err_t err = esp_sleep_enable_timer_wakeup(DEEP_SLEEP_TIME_US);
             if (err == ESP_OK) {
@@ -71,11 +76,11 @@ static void sleep_task(void *arg)
                 esp_deep_sleep_start();
             }
             char text[96];
-            snprintf(text, sizeof(text), "Deep sleep failed:\n%s", esp_err_to_name(err));
+            snprintf(text, sizeof(text), "深度休眠失败:\n%s", esp_err_to_name(err));
             set_status(text);
             ESP_LOGE(TAG, "deep sleep 失败: %s", esp_err_to_name(err));
         } else {
-            set_status("LIGHT SLEEP: 2 SEC\nTimer wakeup");
+            set_status("浅度休眠 2 秒\n定时唤醒");
             vTaskDelay(pdMS_TO_TICKS(150));
             bsp_display_backlight(0);
 
@@ -88,10 +93,10 @@ static void sleep_task(void *arg)
 
             char text[128];
             if (err == ESP_OK) {
-                snprintf(text, sizeof(text), "LIGHT WAKE: TIMER\nSlept: %lld ms",
+                snprintf(text, sizeof(text), "浅睡唤醒: 定时器\n睡眠 %lld 毫秒",
                          (long long)slept_ms);
             } else {
-                snprintf(text, sizeof(text), "Light sleep failed:\n%s", esp_err_to_name(err));
+                snprintf(text, sizeof(text), "浅睡失败:\n%s", esp_err_to_name(err));
                 ESP_LOGE(TAG, "light sleep 失败: %s", esp_err_to_name(err));
             }
             set_status(text);
@@ -102,41 +107,48 @@ static void sleep_task(void *arg)
 
 void demo_low_power_enter(void)
 {
-    s_scr = ui_pixel_screen_create("LOW POWER");
-    lv_obj_t *panel = ui_pixel_panel_create(s_scr, 14, 54, 212, 190, UI_PAPER);
+    s_scr = ui_pixel_screen_create("低功耗");
+    lv_obj_t *panel = ui_pixel_panel_create(s_scr, 14, 65, 212, 190, UI_PAPER);
     s_status = lv_label_create(panel);
     lv_obj_set_width(s_status, 184);
     lv_obj_set_style_text_align(s_status, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(s_status, lv_color_hex(UI_INK), 0);
+    lv_obj_set_style_text_font(s_status, &lv_font_ui_cn_14, 0);
+    lv_obj_set_style_text_color(s_status, lv_color_hex(UI_INK_SOFT), 0);
     lv_obj_align(s_status, LV_ALIGN_TOP_MID, 0, 1);
     if (s_deep_sleep_magic == DEEP_SLEEP_MAGIC &&
         esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
         lv_label_set_text_fmt(s_status,
-                              "DEEP TIMER WAKE  #%lu\nUP/DOWN: SELECT  OK: RUN",
+                              "深度定时唤醒  #%lu\n上/下:选择  确定:运行",
                               (unsigned long)s_deep_sleep_count);
     } else {
-        lv_label_set_text(s_status, "UP/DOWN: SELECT  OK: RUN\nRTC TIMER WAKE ONLY");
+        lv_label_set_text(s_status, "上/下:选择  确定:运行\n仅定时唤醒");
     }
 
     static const char *MODE_NAMES[] = {
-        "LIGHT SLEEP  |  2 SEC",
-        "DEEP SLEEP   |  5 SEC",
+        "浅度休眠  |  2 秒",
+        "深度休眠  |  5 秒",
     };
     for (int i = 0; i < 2; i++) {
-        s_mode_cards[i] = ui_pixel_panel_create(panel, 7, 56 + i * 54,
-                                                 176, 42, UI_PAPER);
+        s_mode_cards[i] = lv_obj_create(panel);
+        lv_obj_remove_flag(s_mode_cards[i], LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_pos(s_mode_cards[i], 7, 56 + i * 54);
+        lv_obj_set_size(s_mode_cards[i], 176, 42);
+        lv_obj_set_style_radius(s_mode_cards[i], 0, 0);
+        lv_obj_set_style_border_width(s_mode_cards[i], 1, 0);
+        lv_obj_set_style_pad_all(s_mode_cards[i], 0, 0);
+        lv_obj_set_style_bg_color(s_mode_cards[i], lv_color_hex(UI_PAPER), 0);
+        lv_obj_set_style_border_color(s_mode_cards[i], lv_color_hex(UI_LINE), 0);
         lv_obj_t *label = lv_label_create(s_mode_cards[i]);
-        lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_font(label, &lv_font_ui_cn_14, 0);
         lv_obj_set_style_text_color(label, lv_color_hex(UI_INK), 0);
         lv_label_set_text(label, MODE_NAMES[i]);
         lv_obj_center(label);
     }
     s_selected = 0;
     menu_refresh();
-    s_mascot = ui_pixel_mascot_create(s_scr, 101, 246);
     s_busy = false;
     if (!s_task && xTaskCreate(sleep_task, "demo_sleep", 3072, NULL, 4, &s_task) != pdPASS) {
-        lv_label_set_text(s_status, "Cannot create\nsleep worker");
+        lv_label_set_text(s_status, "无法创建\n休眠任务");
         ESP_LOGE(TAG, "创建 light-sleep 任务失败");
     }
     lv_screen_load(s_scr);
@@ -156,18 +168,17 @@ void demo_low_power_exit(void)
         s_scr = NULL;
         s_status = NULL;
         s_mode_cards[0] = s_mode_cards[1] = NULL;
-        s_mascot = NULL;
     }
 }
 
 void demo_low_power_key(bsp_btn_t btn, bsp_btn_ev_t ev)
 {
-    if (ev != BSP_BTN_CLICK || s_busy || !s_task) return;
-    if (btn == BSP_BTN_UP || btn == BSP_BTN_DOWN) {
+    if (s_busy || !s_task) return;
+    if ((btn == BSP_BTN_UP || btn == BSP_BTN_DOWN) &&
+        (ev == BSP_BTN_PRESS || ev == BSP_BTN_HOLD)) {
         s_selected = (s_selected + 1) % 2;
         menu_refresh();
-        ui_pixel_mascot_jump(s_mascot);
-    } else if (btn == BSP_BTN_OK) {
+    } else if (btn == BSP_BTN_OK && ev == BSP_BTN_CLICK) {
         uint32_t command = s_selected == 0 ? SLEEP_COMMAND_LIGHT : SLEEP_COMMAND_DEEP;
         xTaskNotify(s_task, command, eSetValueWithOverwrite);
     }

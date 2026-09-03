@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+"""生成 iOS 版的 .xcodeproj。
+
+为什么是生成而不是手工建:手工在 Xcode 里点出来的 .xcodeproj 是个几千行、
+UUID 全随机的文件,没法 review、没法在 diff 里看出改了什么,加一个源文件
+还得所有人重新点一遍。这个脚本按文件名算出稳定的 UUID,所以同样的输入永远
+生成同样的工程文件,加文件只要重跑一次。
+
+真机装机必须走 .xcodeproj:自动签名(申请证书、创建描述文件、注册设备)
+是 Xcode 构建系统的一部分,命令行手工 codesign 那条路要自己拼 entitlements、
+自己嵌描述文件,又长又脆。模拟器/CI 那条路不需要签名,继续用 build-ios.sh。
+"""
+import hashlib
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REL = "mac-relay"
+SRC_DIR = "FoloCodexRelay/Shared"
+PROJ = os.path.join(ROOT, REL, "FoloCodexRelay.xcodeproj")
+
+
+def uid(*parts):
+    """稳定的 24 位十六进制 ID。pbxproj 要求 12 字节。"""
+    h = hashlib.md5("|".join(parts).encode()).hexdigest()
+    return h[:24].upper()
+
+
+def main():
+    src_abs = os.path.join(ROOT, REL, SRC_DIR)
+    if not os.path.isdir(src_abs):
+        sys.exit(f"找不到源码目录: {src_abs}")
+    sources = sorted(f for f in os.listdir(src_abs) if f.endswith(".swift"))
+    if not sources:
+        sys.exit("Shared/ 下一个 .swift 都没有")
+
+    file_refs, build_files, src_children, phase_files = [], [], [], []
+    for name in sources:
+        fref = uid("fileref", name)
+        bfile = uid("buildfile", name)
+        file_refs.append(
+            f'\t\t{fref} /* {name} */ = {{isa = PBXFileReference; '
+            f'lastKnownFileType = sourcecode.swift; path = {name}; '
+            f'sourceTree = "<group>"; }};'
+        )
+        build_files.append(
+            f'\t\t{bfile} /* {name} in Sources */ = {{isa = PBXBuildFile; '
+            f'fileRef = {fref} /* {name} */; }};'
+        )
+        src_children.append(f'\t\t\t\t{fref} /* {name} */,')
+        phase_files.append(f'\t\t\t\t{bfile} /* {name} in Sources */,')
+
+    ids = {k: uid(k) for k in (
+        "project", "target", "product", "maingroup", "sharedgroup",
+        "productgroup", "sourcesphase", "frameworksphase", "resourcesphase",
+        "projconflist", "targetconflist", "projdebug", "projrelease",
+        "configphase",
+        "targetdebug", "targetrelease", "catalogref", "catalogbuild",
+    )}
+
+    # 应用自己的配置随构建打进 bundle。
+    #
+    # ⚠ 必须是构建阶段,不能构建完再拷:产物是签过名的,事后往里塞文件
+    # 会让签名失效,装机时报 "invalid code signature"。
+    #
+    # 用 /bin/sh 写,不用 compgen(那是 bash 内建,Xcode 的脚本阶段默认 sh)。
+    config_script = (
+        'for f in \\"$HOME\\"/.folotoy/*.json; do\\n'
+        '  [ -e \\"$f\\" ] || continue\\n'
+        '  cp \\"$f\\" \\"${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}/\\"\\n'
+        '  echo \\"\\u5df2\\u6253\\u5305: $(basename \\"$f\\")\\"\\n'
+        'done'
+    )
+
+    text = f'''// !$*UTF8*$!
+// 由 tools/gen_ios_project.py 生成,不要手工编辑 —— 重跑脚本即可。
+{{
+	archiveVersion = 1;
+	classes = {{}};
+	objectVersion = 56;
+	objects = {{
+
+/* Begin PBXBuildFile section */
+{chr(10).join(build_files)}
+		{ids["catalogbuild"]} /* AppCatalog in Resources */ = {{isa = PBXBuildFile; fileRef = {ids["catalogref"]} /* AppCatalog */; }};
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+{chr(10).join(file_refs)}
+		{ids["product"]} /* FoloCodexRelay.app */ = {{isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FoloCodexRelay.app; sourceTree = BUILT_PRODUCTS_DIR; }};
+		{ids["catalogref"]} /* AppCatalog */ = {{isa = PBXFileReference; lastKnownFileType = folder; name = AppCatalog; path = AppCatalog; sourceTree = "<group>"; }};
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		{ids["maingroup"]} = {{
+			isa = PBXGroup;
+			children = (
+				{ids["sharedgroup"]} /* Shared */,
+				{ids["catalogref"]} /* AppCatalog */,
+				{ids["productgroup"]} /* Products */,
+			);
+			sourceTree = "<group>";
+		}};
+		{ids["sharedgroup"]} /* Shared */ = {{
+			isa = PBXGroup;
+			children = (
+{chr(10).join(src_children)}
+			);
+			path = {SRC_DIR};
+			sourceTree = "<group>";
+		}};
+		{ids["productgroup"]} /* Products */ = {{
+			isa = PBXGroup;
+			children = (
+				{ids["product"]} /* FoloCodexRelay.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		}};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		{ids["target"]} /* FoloCodexRelay */ = {{
+			isa = PBXNativeTarget;
+			buildConfigurationList = {ids["targetconflist"]};
+			buildPhases = (
+				{ids["sourcesphase"]},
+				{ids["frameworksphase"]},
+				{ids["resourcesphase"]},
+				{ids["configphase"]},
+			);
+			buildRules = ();
+			dependencies = ();
+			name = FoloCodexRelay;
+			productName = FoloCodexRelay;
+			productReference = {ids["product"]} /* FoloCodexRelay.app */;
+			productType = "com.apple.product-type.application";
+		}};
+/* End PBXNativeTarget section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		{ids["configphase"]} /* 打包应用配置 */ = {{
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = ();
+			inputPaths = ();
+			name = "\u6253\u5305\u5e94\u7528\u914d\u7f6e";
+			outputPaths = ();
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "{config_script}";
+		}};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXProject section */
+		{ids["project"]} /* Project object */ = {{
+			isa = PBXProject;
+			attributes = {{
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {{
+					{ids["target"]} = {{
+						CreatedOnToolsVersion = 16.0;
+					}};
+				}};
+			}};
+			buildConfigurationList = {ids["projconflist"]};
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base);
+			mainGroup = {ids["maingroup"]};
+			productRefGroup = {ids["productgroup"]} /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				{ids["target"]} /* FoloCodexRelay */,
+			);
+		}};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		{ids["resourcesphase"]} = {{
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				{ids["catalogbuild"]} /* AppCatalog in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		}};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		{ids["sourcesphase"]} = {{
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+{chr(10).join(phase_files)}
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		}};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		{ids["frameworksphase"]} = {{
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			runOnlyForDeploymentPostprocessing = 0;
+		}};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		{ids["projdebug"]} /* Debug */ = {{
+			isa = XCBuildConfiguration;
+			buildSettings = {{
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			}};
+			name = Debug;
+		}};
+		{ids["projrelease"]} /* Release */ = {{
+			isa = XCBuildConfiguration;
+			buildSettings = {{
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 5.0;
+				VALIDATE_PRODUCT = YES;
+			}};
+			name = Release;
+		}};
+		{ids["targetdebug"]} /* Debug */ = {{
+			isa = XCBuildConfiguration;
+			buildSettings = {{
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				APS_ENVIRONMENT = development;
+				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_ENTITLEMENTS = "FoloCodexRelay/FoloCodexRelay.entitlements";
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "FoloCodexRelay/Info-iOS.plist";
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.folotoy.codexrelay;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			}};
+			name = Debug;
+		}};
+		{ids["targetrelease"]} /* Release */ = {{
+			isa = XCBuildConfiguration;
+			buildSettings = {{
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				APS_ENVIRONMENT = production;
+				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_ENTITLEMENTS = "FoloCodexRelay/FoloCodexRelay.entitlements";
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "FoloCodexRelay/Info-iOS.plist";
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.folotoy.codexrelay;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			}};
+			name = Release;
+		}};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		{ids["projconflist"]} = {{
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				{ids["projdebug"]} /* Debug */,
+				{ids["projrelease"]} /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		}};
+		{ids["targetconflist"]} = {{
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				{ids["targetdebug"]} /* Debug */,
+				{ids["targetrelease"]} /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		}};
+/* End XCConfigurationList section */
+	}};
+	rootObject = {ids["project"]} /* Project object */;
+}}
+'''
+
+    os.makedirs(PROJ, exist_ok=True)
+    out = os.path.join(PROJ, "project.pbxproj")
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"生成完成: {out}")
+    print(f"  {len(sources)} 个源文件(只有 Shared/,macOS/ 不参与 iOS 构建)")
+    print("  DEVELOPMENT_TEAM 不写入工程;真机构建时由 install-ios.sh 临时传入")
+
+
+if __name__ == "__main__":
+    main()

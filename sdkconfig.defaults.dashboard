@@ -1,0 +1,7 @@
+# 服务器面板应用变体。
+#
+# 用法:  ./tools/build_variant.sh dashboard
+#
+# 这个文件只写"跟启动器不一样的地方",基础配置仍然来自 sdkconfig.defaults
+# (构建脚本会把两个文件按顺序都传给 SDKCONFIG_DEFAULTS)。
+CONFIG_APP_VARIANT_DASHBOARD=y

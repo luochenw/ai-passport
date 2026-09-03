@@ -1,6 +1,9 @@
 #include "ui_pixel.h"
+#include "ui_statusbar.h"
 
-static void start_blink(lv_obj_t *eye);
+#define UI_CORNER_R 20  /* 呼应外壳圆角塑料窗口 */
+
+static lv_obj_t *s_scr;
 
 static lv_obj_t *block(lv_obj_t *parent, int x, int y, int w, int h, uint32_t color)
 {
@@ -25,126 +28,78 @@ lv_obj_t *ui_pixel_label(lv_obj_t *parent, const char *text,
     return label;
 }
 
-static void add_cloud(lv_obj_t *parent, int x, int y)
-{
-    block(parent, x + 1, y + 7, 43, 10, UI_INK);
-    block(parent, x + 5, y + 4, 35, 10, 0xFFFFFF);
-    block(parent, x + 12, y, 10, 9, 0xFFFFFF);
-    block(parent, x + 27, y + 1, 9, 8, 0xFFFFFF);
-}
-
 lv_obj_t *ui_pixel_screen_create(const char *title)
 {
+    (void)title;    /* 高级黑客终端风:去掉 logo 与页面名称,只留取景框 */
+
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(scr, lv_color_hex(UI_SKY), 0);
+    /* 纯黑机身底,与外壳的圆角塑料窗口衔接 */
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
     lv_obj_set_style_border_width(scr, 0, 0);
     lv_obj_set_style_pad_all(scr, 0, 0);
 
-    add_cloud(scr, 188, 8);
-    block(scr, 0, 286, 240, 34, UI_GRASS);
-    block(scr, 0, 286, 240, 4, 0xA7D93E);
-    for (int x = 0; x < 240; x += 30) {
-        block(scr, x, 312, 18, 8, UI_GRASS_DARK);
-        block(scr, x + 18, 316, 12, 4, 0x75452E);
-    }
+    /* 给常驻状态栏让出顶部这一条。
+     *
+     * 这一行是所有页面"内容自动下移"的**唯一**机制:LVGL 里子对象的坐标是
+     * 相对父对象内容区的(lv_obj_move_to() 末尾会加上 parent 的 space_top),
+     * 所以在这里设一次 pad_top,十几个页面里那些写死的 y 坐标全部自动让位,
+     * 页面代码一行都不用改、也不可能有哪个页面忘了让。
+     *
+     * 底部对齐的元素不受影响:LV_ALIGN_BOTTOM_* 算的是 y += ph - h,而 ph 是
+     * 已经扣掉 pad_top 的内容高度,move_to() 再把 pad_top 加回去,一进一出正好
+     * 抵消 —— 底部提示条还贴在屏幕底边。
+     *
+     * ⚠ 唯一不会自动跟上的是**写死了 320** 的地方(那算的是绝对高度)。
+     * 那种比较要改用 UI_CONTENT_H。 */
+    lv_obj_set_style_pad_top(scr, UI_STATUSBAR_H, 0);
 
-    block(scr, 9, 12, 151, 33, UI_INK);
-    lv_obj_t *plate = block(scr, 5, 8, 151, 33, UI_PAPER);
-    lv_obj_set_style_border_color(plate, lv_color_hex(UI_INK), 0);
-    lv_obj_set_style_border_width(plate, 3, 0);
-    lv_obj_t *heading = ui_pixel_label(plate, title, &lv_font_montserrat_20, UI_INK);
-    lv_obj_center(heading);
+    /* 圆角深色屏幕层:圆角呼应外壳。
+     *
+     * 边框保留(圆角靠它成形,也负责把内容和外壳窗口分开),但颜色改成纯黑
+     * 而不是强调色 —— 一圈高饱和的橙框在这块小屏上会把视线从内容上拽走,
+     * 而它本身不传达任何信息。 */
+    lv_obj_t *display = lv_obj_create(scr);
+    lv_obj_remove_flag(display, LV_OBJ_FLAG_SCROLLABLE);
+    /* 取景框也是 scr 的子对象,所以它同样吃 pad_top —— 内容区原点已经在状态栏
+     * 下面了,写 (2, 0) 就是紧贴状态栏。高度相应缩掉状态栏那一条,底边仍落在
+     * 原来的 318,不会戳出屏幕。 */
+    lv_obj_set_pos(display, 2, 0);
+    lv_obj_set_size(display, 236, 316 - UI_STATUSBAR_H);
+    lv_obj_set_style_radius(display, UI_CORNER_R, 0);
+    lv_obj_set_style_bg_color(display, lv_color_hex(UI_BG), 0);
+    lv_obj_set_style_border_width(display, 2, 0);
+    lv_obj_set_style_border_color(display, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_pad_all(display, 0, 0);
+
+    s_scr = scr;
     return scr;
 }
 
 lv_obj_t *ui_pixel_panel_create(lv_obj_t *parent, int x, int y, int w, int h,
                                 uint32_t color)
 {
-    block(parent, x + 5, y + 6, w, h, UI_INK);
     lv_obj_t *panel = block(parent, x, y, w, h, color);
-    lv_obj_set_style_border_color(panel, lv_color_hex(UI_INK), 0);
-    lv_obj_set_style_border_width(panel, 4, 0);
-    lv_obj_set_style_pad_all(panel, 7, 0);
+    lv_obj_set_style_border_color(panel, lv_color_hex(UI_LINE), 0);
+    lv_obj_set_style_border_width(panel, 1, 0);
+    lv_obj_set_style_pad_all(panel, 8, 0);
     return panel;
-}
-
-lv_obj_t *ui_pixel_mascot_create(lv_obj_t *parent, int x, int y)
-{
-    lv_obj_t *m = lv_obj_create(parent);
-    lv_obj_remove_flag(m, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_pos(m, x, y);
-    lv_obj_set_size(m, 38, 48);
-    lv_obj_set_style_bg_opa(m, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(m, 0, 0);
-    lv_obj_set_style_pad_all(m, 0, 0);
-
-    /* 原创“小电视机器人”：天线、发光屏幕脸、橙色围巾与履带脚。 */
-    block(m, 18, 0, 3, 6, UI_INK);
-    block(m, 16, 0, 7, 3, UI_ORANGE);
-    block(m, 3, 6, 32, 24, UI_INK);
-    block(m, 0, 12, 5, 10, 0x7557D9);
-    block(m, 33, 12, 5, 10, 0x7557D9);
-    block(m, 7, 10, 24, 16, 0xB9F3FF);
-    lv_obj_t *left_eye = block(m, 11, 14, 4, 6, 0x294B7A);
-    lv_obj_t *right_eye = block(m, 23, 14, 4, 6, 0x294B7A);
-    block(m, 16, 22, 7, 2, 0x7557D9);
-    block(m, 10, 29, 18, 4, UI_ORANGE);
-    block(m, 8, 33, 22, 11, 0x7557D9);
-    block(m, 3, 35, 5, 7, 0xB9F3FF);
-    block(m, 30, 35, 5, 7, 0xB9F3FF);
-    block(m, 8, 44, 9, 4, UI_INK);
-    block(m, 21, 44, 9, 4, UI_INK);
-    start_blink(left_eye);
-    start_blink(right_eye);
-    return m;
-}
-
-static void jump_y(void *obj, int32_t value)
-{
-    lv_obj_set_y((lv_obj_t *)obj, value);
-}
-
-static void blink_eye(void *obj, int32_t value)
-{
-    lv_obj_set_style_opa((lv_obj_t *)obj, (lv_opa_t)value, 0);
-}
-
-static void start_blink(lv_obj_t *eye)
-{
-    lv_anim_t anim;
-    lv_anim_init(&anim);
-    lv_anim_set_var(&anim, eye);
-    lv_anim_set_exec_cb(&anim, blink_eye);
-    lv_anim_set_values(&anim, LV_OPA_COVER, LV_OPA_20);
-    lv_anim_set_duration(&anim, 70);
-    lv_anim_set_playback_duration(&anim, 70);
-    lv_anim_set_repeat_delay(&anim, 1700);
-    lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_set_path_cb(&anim, lv_anim_path_step);
-    lv_anim_start(&anim);
-}
-
-void ui_pixel_mascot_jump(lv_obj_t *mascot)
-{
-    if (!mascot) return;
-    int y = lv_obj_get_y(mascot);
-    lv_anim_delete(mascot, jump_y);
-    lv_anim_t anim;
-    lv_anim_init(&anim);
-    lv_anim_set_var(&anim, mascot);
-    lv_anim_set_exec_cb(&anim, jump_y);
-    lv_anim_set_values(&anim, y, y - 5);
-    lv_anim_set_duration(&anim, 110);
-    lv_anim_set_playback_duration(&anim, 140);
-    lv_anim_set_path_cb(&anim, lv_anim_path_step);
-    lv_anim_start(&anim);
 }
 
 void ui_pixel_set_selected(lv_obj_t *panel, bool selected, bool enabled)
 {
-    uint32_t color = !enabled ? 0x78909C : (selected ? UI_YELLOW : UI_PAPER);
-    lv_obj_set_style_bg_color(panel, lv_color_hex(color), 0);
+    if (!enabled) {
+        lv_obj_set_style_bg_color(panel, lv_color_hex(UI_BG_SOFT), 0);
+        lv_obj_set_style_border_color(panel, lv_color_hex(UI_LINE), 0);
+        return;
+    }
+    ui_pixel_mark(panel, selected);
+}
+
+void ui_pixel_mark(lv_obj_t *panel, bool selected)
+{
+    lv_obj_set_style_bg_color(panel,
+        lv_color_hex(selected ? UI_ACCENT_BG : UI_PAPER), 0);
     lv_obj_set_style_border_color(panel,
-        lv_color_hex(selected ? 0xFFFFFF : UI_INK), 0);
+        lv_color_hex(selected ? UI_ACCENT : UI_LINE), 0);
 }

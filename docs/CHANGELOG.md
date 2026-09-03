@@ -6,6 +6,16 @@
 
 ## Unreleased
 
+- Simplified the companion firmware panel to one bundled latest firmware and a
+  single update action. Re-updating while the device is running from `appslot`
+  now restarts through the factory launcher before safely rewriting `appslot`.
+
+- Added a local-first walkie-talkie application with half-duplex room control,
+  realtime BLE audio transport, a local WebSocket relay, and iOS Push to Talk
+  integration for supported background and lock-screen delivery. Its companion
+  settings open from the walkie-talkie item in the Applications list instead
+  of occupying a separate top-level tab.
+
 - Added the supplied 80-byte CW2017 profile for the specified 520 mAh cell, including content/update-flag checks, verified writes, the required restart sequence, and bounded SOC-readiness polling.
 
 - Reorganized the documentation by function area with a dual entry point: the root `AGENTS.md` is now a thin router (hard constraints + task routing only) and the detailed AI workflow lives in `docs/development/ai-guide.md`; `agent-guide.md` was folded in. `docs/development/` gained a second level (`engineering/`, `ci/`, `release/`), and the `plays/` application archive and `experiences/` moved into a `docs/reference/` area with a dedicated README. Removed `docs/software-design/` (empty scaffold); folded the three `assets/{fonts,images,music}/README` leaves into the `assets/` README; flattened the six `project-completion` sub-documents into a single file; and unified each directory to a single README, eliminating every `INDEX` file and a duplicated experience index. All cross-references and bibliographic links were updated; no content was dropped.
