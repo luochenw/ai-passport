@@ -1,6 +1,19 @@
 build/
+/mac-relay/build-ios/
+/mac-relay/build-ios-sim/
+mac-relay/AppCatalog/*.bin
+__pycache__/
+*.py[cod]
 sdkconfig
 sdkconfig.old
 managed_components/
 .vscode/
 .idea/
+
+# ESP-IDF 的第二个构建目录。`build/` 那一条匹配不到它,而它是 266MB 的
+# 构建产物 —— 漏掉的话一次提交会带进两千多个文件。
+build-dashboard/
+
+# Xcode 的**每个用户各自的**界面状态和 scheme 管理。跟代码无关,
+# 而且是二进制,提交进去只会在多人协作时天天冲突。
+xcuserdata/
