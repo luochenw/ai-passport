@@ -21,12 +21,12 @@ private func check(_ condition: Bool, _ message: String) {
 private final class FakeCapability: AppCapability {
     static let id = "fake"
     var onChange: (() -> Void)?
-    var state: JSONValue = .object([:])
+    var value: JSONValue = .object([:])
     var overlayValue: AppOverlay?
     private(set) var performed: [String] = []
 
     var overlay: AppOverlay? { overlayValue }
-    func snapshot() -> JSONValue { state }
+    func state() -> JSONValue { value }
 
     @discardableResult
     func perform(_ action: String) -> Bool {
@@ -83,7 +83,7 @@ struct TestManifest {
 
         // ---------- 解释器 ----------
         let cap = FakeCapability()
-        cap.state = root
+        cap.value = root
         let m = manifest("""
         {
           "id": "fake", "name": "假应用", "capability": "fake",
@@ -137,7 +137,7 @@ struct TestManifest {
         // 这个数组由能力给(容器列表、菜单条目),长度不受清单控制。不截的话
         // 一屏几百行会把设备侧 1KB 的接收缓冲撑爆,整屏被丢弃 —— 表现是
         // "某天容器多了之后这一页就白了"。
-        cap.state = .object(["many": .array((0..<500).map { .string("x\($0)") })])
+        cap.value = .object(["many": .array((0..<500).map { .string("x\($0)") })])
         let big = manifest("""
         {
           "id": "fake", "name": "多", "capability": "fake",

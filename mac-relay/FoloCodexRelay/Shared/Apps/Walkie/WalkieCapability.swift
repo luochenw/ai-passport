@@ -1,12 +1,21 @@
 import Foundation
 import SwiftUI
 
-final class WalkieTalkieApp: ObservableObject, RemoteApp {
-    let name = "对讲机"
-    let detail = "局域网实时对讲"
-    let defaultIcon = DeviceIcon.find("\u{F0E0}").glyph
-    let settingsRoute: RemoteAppSettingsRoute? = .walkieTalkie
-    var requestPush: (() -> Void)?
+// 这个文件现在是**能力**,不是应用。
+//
+// 对讲最能说明"应用"和"能力"是两件事:WalkieTalkieApp.render() 里从来没有
+// 一行音频代码 —— 它只是四行插值加一个三分支,handleKey 也只有两行
+// (下键按下 beginTalk、松开 endTalk)。音频走的是
+// 设备 → BLE 对讲特征值 → BLERelay → WalkieClient → WebSocket,那是传输层。
+//
+// 所以屏幕和按键绑定进了 AppManifests/walkie.json,可以从 GitHub 更新;
+// 留在这里的是清单描述不了的:实时音频通道、抢麦状态机、以及伴侣端那个
+// SwiftUI 设置页的 @Published 模型。
+final class WalkieCapability: ObservableObject, AppCapability {
+    static let id = "walkie"
+
+    var onChange: (() -> Void)?
+    /// 后台来话的通知。由解释器注入 —— 通知走 cmd.notify,跟屏幕是两条路。
     var notify: ((String) -> Void)?
 
     @Published var serverAddress: String
@@ -49,7 +58,7 @@ final class WalkieTalkieApp: ObservableObject, RemoteApp {
             DispatchQueue.main.async {
                 self.snapshot = value
             }
-            self.requestPush?()
+            self.onChange?()
         }
         client.onInstalledChanged = { [weak self] installed, room in
             self?.installationChanged?(installed, room)
@@ -68,46 +77,40 @@ final class WalkieTalkieApp: ObservableObject, RemoteApp {
         devicePageActive = active
         stateLock.unlock()
         if active {
-            requestPush?()
+            onChange?()
         } else {
             client.endTalk()
         }
     }
 
-    func handleKey(_ button: RemoteButton, _ event: RemoteButtonEvent) -> Bool {
-        guard button == .down else { return false }
-        if event == .press {
-            client.beginTalk()
-        } else if event == .release {
-            client.endTalk()
+    /// 清单里 `down.press` / `down.release` 绑到这儿。
+    ///
+    /// ⚠ 返回 false:按住说话不该触发重推屏幕。真正的界面变化由服务器的
+    /// 抢麦回执驱动(onSnapshot → onChange),按下的那一瞬间还什么都没变 ——
+    /// 返回 true 会让每次按住都多推一屏没有变化的内容。
+    @discardableResult
+    func perform(_ action: String) -> Bool {
+        switch action {
+        case "beginTalk": client.beginTalk()
+        case "endTalk": client.endTalk()
+        default: break
         }
         return false
     }
 
-    func render() -> Screen {
+    /// 交给模板取值的那棵树。
+    func state() -> JSONValue {
         stateLock.lock()
-        let state = deviceSnapshot
+        let s = deviceSnapshot
         stateLock.unlock()
-
-        var screen = Screen()
-        screen.title = "对讲机"
-        screen.text("房间  \(state.room)")
-        screen.text(state.connected ? "服务  已连接" : "服务  未连接")
-        // 设备屏上一行只有 26 个半角,写不下"含自己"的解释 —— 但设备是
-        // 用户拿在手里的那一台,他知道自己有几台;真正会误解的是电脑上那
-        // 一行,解释放在那里(见 WalkieSettingsView)。
-        screen.text("在线  \(state.members) 人")
-        screen.spacer()
-        if state.transmitting {
-            screen.text("• 我正在讲话")
-        } else if let speaker = state.speaker {
-            screen.text("• \(speaker) 正在讲话")
-        } else {
-            screen.text(state.status)
-        }
-        screen.walkie = true
-        screen.footer = state.connected ? "按住下键讲话" : "请在伴侣端检查服务"
-        return screen
+        return .object([
+            "room": .string(s.room),
+            "connected": .bool(s.connected),
+            "members": .number(Double(s.members)),
+            "transmitting": .bool(s.transmitting),
+            "speaker": s.speaker.map { JSONValue.string($0) } ?? .null,
+            "status": .string(s.status),
+        ])
     }
 
     func saveAndReconnect() {
@@ -151,7 +154,7 @@ private struct StatusRow: View {
 }
 
 struct WalkieTalkieView: View {
-    @ObservedObject var model: WalkieTalkieApp
+    @ObservedObject var model: WalkieCapability
 
     private var s: WalkieSnapshot { model.snapshot }
 

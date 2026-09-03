@@ -1,0 +1,33 @@
+{
+  "id": "walkie",
+  "name": "对讲机",
+  "detail": "局域网实时对讲",
+  "icon": "",
+  "capability": "walkie",
+  "settings": "walkieTalkie",
+
+  "keys": {
+    "down": { "press": "beginTalk", "release": "endTalk" }
+  },
+
+  "screens": [
+    {
+      "title": "对讲机",
+      "hint": "walkie",
+      "footer": "{{connected|pick:按住下键讲话/请在伴侣端检查服务}}",
+      "rows": [
+        { "text": "房间  {{room}}" },
+        { "text": "服务  {{connected|pick:已连接/未连接}}" },
+        { "text": "在线  {{members}} 人" },
+        { "spacer": true },
+        { "when": { "cond": "transmitting",
+                    "then": [ { "text": "• 我正在讲话" } ],
+                    "else": [
+          { "when": { "cond": "speaker",
+                      "then": [ { "text": "• {{speaker}} 正在讲话" } ],
+                      "else": [ { "text": "{{status}}" } ] } }
+        ] } }
+      ]
+    }
+  ]
+}

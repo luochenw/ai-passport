@@ -20,6 +20,12 @@ final class ManifestApp: RemoteApp {
     var name: String { manifest.name }
     var detail: String { manifest.detail }
     var defaultIcon: String { manifest.icon }
+    /// 清单里写的是路由名(字符串),这里翻成枚举。翻不出来就是没有设置页 ——
+    /// 一个更新的清单可能引用了这个伴侣端还没有的设置页,那时候少一个齿轮
+    /// 图标,远好过点进去一片空白。
+    var settingsRoute: RemoteAppSettingsRoute? {
+        manifest.settings.flatMap(RemoteAppSettingsRoute.init(rawValue:))
+    }
 
     var requestPush: (() -> Void)?
     var notify: ((String) -> Void)?
@@ -53,7 +59,7 @@ final class ManifestApp: RemoteApp {
         lock.unlock()
 
         let screen = manifest.screens[idx]
-        let root = capability.snapshot()
+        let root = capability.state()
 
         var s = Screen()
         // 多屏时标题带页码 —— 用户得知道还有别的页,以及自己在第几页。

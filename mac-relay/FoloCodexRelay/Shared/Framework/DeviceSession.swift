@@ -45,7 +45,7 @@ final class DeviceSession {
     let remoteAppsModel: RemoteAppsModel
     let appStoreModel: AppStoreModel
     let deviceConfigModel: DeviceConfigModel
-    let walkieApp: WalkieTalkieApp
+    let walkieCapability: WalkieCapability
     let mealApp: MealApp
 
     private let walkieClient: WalkieClient
@@ -81,7 +81,7 @@ final class DeviceSession {
             : deviceName
         walkieClient = WalkieClient(deviceKey: deviceID.uuidString,
                                     defaultName: short.isEmpty ? "Passport" : "Passport-" + short)
-        walkieApp = WalkieTalkieApp(client: walkieClient)
+        walkieCapability = WalkieCapability(client: walkieClient)
         // 提醒调度器全局一份:通知是弹给**一个人**看的,跟他手里有几台
         // Passport 无关;而且通知标识符没有设备区分,每台各起一个调度器的话,
         // 后一个 update 会把前一个排好的饭点通知全删掉。
@@ -179,7 +179,13 @@ final class DeviceSession {
             remoteHost.register(ManifestApp(manifest: manifest,
                                             capability: DashboardCapability()))
         }
-        remoteHost.register(walkieApp)
+        if let manifest = ManifestStore.load(WalkieCapability.id) {
+            let app = ManifestApp(manifest: manifest, capability: walkieCapability)
+            // 后台来话的通知走 cmd.notify,跟屏幕是两条路 —— 能力自己发不了,
+            // 得由解释器把 host 注入的那个通道转给它。
+            walkieCapability.notify = { [weak app] text in app?.notify?(text) }
+            remoteHost.register(app)
+        }
         remoteHost.register(mealApp)
 
         #if os(macOS)
@@ -286,10 +292,10 @@ final class DeviceSession {
         ptt.onTransmitFailure = { [walkieClient] message in
             walkieClient.systemTransmitFailed(message)
         }
-        walkieApp.installationChanged = { [weak ptt] installed, room in
+        walkieCapability.installationChanged = { [weak ptt] installed, room in
             ptt?.setEnabled(installed, room: room)
         }
-        walkieApp.roomChanged = { [weak ptt] room in ptt?.updateRoom(room) }
+        walkieCapability.roomChanged = { [weak ptt] room in ptt?.updateRoom(room) }
         ptt.start(restoringEnabled: walkieClient.currentSnapshot().installed)
     }
 

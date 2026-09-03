@@ -100,7 +100,7 @@ final class DashboardCapability: AppCapability {
     }
 
     /// 交给模板取值的那棵树。
-    func snapshot() -> JSONValue {
+    func state() -> JSONValue {
         var root: [String: JSONValue] = ["status": .string(status)]
         if let d = data, case let .object(fields) = JSONValue.from(d) {
             root.merge(fields) { _, new in new }

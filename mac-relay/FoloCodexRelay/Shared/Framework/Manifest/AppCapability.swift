@@ -17,7 +17,7 @@ protocol AppCapability: AnyObject {
 
     /// 当前状态,交给模板取值。会被频繁调用,应当廉价 ——
     /// 取数据放后台,拿到之后调 `onChange`。
-    func snapshot() -> JSONValue
+    func state() -> JSONValue
 
     /// 状态变了,该重推一屏。由框架注入。
     var onChange: (() -> Void)? { get set }

@@ -52,6 +52,9 @@ struct AppManifest {
     var capability: String
     /// 一屏或多屏。多屏时上下键翻页,页码显示在标题里。
     var screens: [ManifestScreen]
+    /// 这个应用在伴侣端有没有自己的设置页,以及是哪一页。
+    /// 设置页是 SwiftUI 写的原生界面 —— 清单只说"有",不描述它长什么样。
+    var settings: String?
     /// 按键绑到能力的哪个动作。键名:`up` / `down` / `ok`,
     /// 值形如 `press:beginTalk` / `release:endTalk` / `click:toggle`。
     var keys: [String: [String: String]]
@@ -103,7 +106,7 @@ extension ManifestRow: Decodable {
 extension ManifestScreen: Decodable {}
 extension AppManifest: Decodable {
     private enum Keys: String, CodingKey {
-        case id, name, detail, icon, capability, screens, keys
+        case id, name, detail, icon, capability, screens, keys, settings
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -114,6 +117,7 @@ extension AppManifest: Decodable {
         capability = try c.decode(String.self, forKey: .capability)
         screens = try c.decode([ManifestScreen].self, forKey: .screens)
         keys = try c.decodeIfPresent([String: [String: String]].self, forKey: .keys) ?? [:]
+        settings = try c.decodeIfPresent(String.self, forKey: .settings)
         guard !screens.isEmpty else {
             throw DecodingError.dataCorruptedError(
                 forKey: .screens, in: c, debugDescription: "至少要有一屏")

@@ -85,7 +85,7 @@ private struct SessionView: View {
                     .navigationDestination(for: RemoteAppSettingsRoute.self) { route in
                         switch route {
                         case .walkieTalkie:
-                            WalkieTalkieView(model: session.walkieApp)
+                            WalkieTalkieView(model: session.walkieCapability)
                                 .navigationTitle("对讲机设置")
                         case .meal:
                             MealSettingsView(model: session.mealApp)
