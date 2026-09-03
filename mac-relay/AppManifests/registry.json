@@ -1,0 +1,26 @@
+[
+  {
+    "id": "codex",
+    "name": "Codex",
+    "url": "codex.json",
+    "sha256": "0f91304741d46c432efac77adff65891f31fa0d3841e0073bba3a6aef46be468"
+  },
+  {
+    "id": "dashboard",
+    "name": "服务器面板",
+    "url": "dashboard.json",
+    "sha256": "ee164c77edce29c0bdc45d7f730cfa1baa93d755f3569b9818b874f8650b6553"
+  },
+  {
+    "id": "meal",
+    "name": "吃饭",
+    "url": "meal.json",
+    "sha256": "ad03b2a3aa5b509f5173d766167a9afc9c5252b92d58e28ee3e4986c4d3e68ee"
+  },
+  {
+    "id": "walkie",
+    "name": "对讲机",
+    "url": "walkie.json",
+    "sha256": "4cb97c71d7bbea755eecd21cff6fc5be0a4b1e422145536b775c998305bc4c4a"
+  }
+]

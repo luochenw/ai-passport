@@ -246,7 +246,7 @@ final class DashboardServerTrustDelegate: NSObject, URLSessionTaskDelegate {
         }
 
         let certificateData = SecCertificateCopyData(certificate) as Data
-        let actualFingerprint = RemoteAppCatalog.sha256Hex(certificateData)
+        let actualFingerprint = Digest.sha256Hex(certificateData)
         guard actualFingerprint == expectedFingerprint else {
             log("[dashboard] 证书指纹不匹配 host=\(host)")
             completionHandler(.cancelAuthenticationChallenge, nil)

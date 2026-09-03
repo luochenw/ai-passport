@@ -57,11 +57,14 @@ enum ManifestStore {
     /// 按顺序找一份清单。全都没有就返回 nil —— 调用方据此跳过这个应用,
     /// 而不是注册一个画不出东西的空壳。
     static func load(_ id: String) -> AppManifest? {
-        for dir in [cacheDirectory, sourceDirectory, bundleDirectory].compactMap({ $0 }) {
+        let dirs = [cacheDirectory, sourceDirectory, bundleDirectory].compactMap { $0 }
+        for dir in dirs {
             let url = dir.appendingPathComponent("\(id).json")
             guard let data = FileManager.default.contents(atPath: url.path) else { continue }
             do {
-                return try AppManifest.decode(data)
+                let manifest = try AppManifest.decode(data)
+                warnIfShadowingSource(id: id, winner: dir, data: data)
+                return manifest
             } catch {
                 // ⚠ 解析失败要**继续往下找**,不能就此放弃。
                 //
@@ -75,6 +78,24 @@ enum ManifestStore {
         }
         log("[manifest] 找不到 \(id) 的清单")
         return nil
+    }
+
+    /// 缓存盖住源码树里那份、而且两份内容不一样时,喊一声。
+    ///
+    /// 开发时踩这个坑代价很高:你改了 AppManifests/walkie.json,重启,
+    /// 屏幕纹丝不动 —— 因为上一次从网上拉的那份还在缓存里,而缓存排在
+    /// 查找顺序第一位。没有任何报错,看起来就像"我的改动没生效",于是
+    /// 开始怀疑模板、怀疑解释器、怀疑设备。
+    ///
+    /// 不改查找顺序:缓存必须排第一,否则"从网上更新应用"在开发机上
+    /// 永远测不到。所以是留一行日志,外加下面这行清缓存的命令。
+    private static func warnIfShadowingSource(id: String, winner: URL, data: Data) {
+        guard winner == cacheDirectory, let source = sourceDirectory else { return }
+        let sourceURL = source.appendingPathComponent("\(id).json")
+        guard let local = FileManager.default.contents(atPath: sourceURL.path),
+              local != data else { return }
+        log("[manifest] ⚠ \(id) 用的是缓存那份,源码树里的改动没生效。"
+            + "清掉:rm -rf \(cacheDirectory.path)")
     }
 
     /// 把拉下来的清单写进缓存。**调用方必须已经校验过 sha256** —— 这里

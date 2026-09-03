@@ -110,6 +110,16 @@ final class AppCore {
             DispatchQueue.main.async { devicesModel.devices = list }
         }
 
+        // 启动时拉一遍应用清单。
+        //
+        // 拉的是**数据**,不是代码 —— iOS 禁止下载并执行代码,而应用的屏幕
+        // 和按键绑定本来就可以是数据(见 Framework/Manifest/)。
+        //
+        // 尽力而为:拉不到、校验不过、解析不了都退回缓存或内置版本。一次
+        // 断网不该让所有应用消失。也**不阻塞启动** —— BLE 该扫就扫,清单
+        // 落地之后下一台设备连上就用新的。
+        AppRegistry.refresh()
+
         relay.start()
 
         log("FoloCodexRelay 已启动:等待 \(BLERelay.namePrefix)* 连接(可同时连多台,每台一个独立会话)")

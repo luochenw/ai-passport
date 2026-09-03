@@ -14,6 +14,11 @@ run_static_checks() {
 
     python3 tools/check_repo.py
 
+    # 应用目录必须和清单同步。对不上的后果是**静默**的:伴侣端拉下清单、
+    # 摘要不符、全部丢弃、退回内置版本 —— 屏幕上一切正常,只是"从网上更新
+    # 应用"这个功能悄悄不工作了。
+    python3 tools/gen_manifest_registry.py --check
+
     actionlint_bin="${ACTIONLINT_BIN:-}"
     if [[ -z "${actionlint_bin}" ]]; then
         actionlint_bin="$(command -v actionlint || true)"
@@ -106,6 +111,19 @@ run_static_checks() {
             mac-relay/FoloCodexRelay/Shared/Apps/Codex/CodexCapability.swift \
             mac-relay/FoloCodexRelay/Shared/Framework/Protocol.swift
         "${test_dir}/test_manifest"
+
+        # 应用目录:从网上收下一份清单之前的那三个判断。这是整套"从 GitHub
+        # 更新应用"里唯一有安全后果的地方 —— 清单会被解释成设备上显示的
+        # 每一行字和每一个按键绑定,校验放松一点,后果不是崩溃,是设备
+        # 安静地按别人写的剧本工作。最后一组断言还把 Python 那边的生成器
+        # 和这边的验证器接在一起:两边只要有一边动了字节,当场失败。
+        swiftc -o "${test_dir}/test_app_registry" \
+            tests/test_app_registry.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Manifest/AppRegistry.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Manifest/AppManifest.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Manifest/ManifestStore.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Digest.swift
+        HOME="${test_dir}" "${test_dir}/test_app_registry"
 
         swiftc -o "${test_dir}/test_meal_client" \
             tests/test_meal_client.swift \

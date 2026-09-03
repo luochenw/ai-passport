@@ -17,11 +17,28 @@ import Foundation
 
 enum AppConfigStore {
 
+    /// 家目录。
+    ///
+    /// ⚠ 先看 `$HOME`,`NSHomeDirectory()` 只作兜底 —— 这两个在 macOS 上**不是
+    /// 一回事**:`NSHomeDirectory()` 走的是账户数据库(getpwuid),把 `$HOME`
+    /// 指到别处它完全不理会。
+    ///
+    /// 这不是学术区别。validate.sh 里每个碰配置的测试都写着
+    /// `HOME="${test_dir}"`,注释也讲明了用意是"别污染用户自己的配置" ——
+    /// 但只要这里读的是 `NSHomeDirectory()`,那道防线就是空的:测试照样写进
+    /// 真实的 `~/.folotoy/`,而那里面装着 NAS 口令。一个跑测试的动作不该有
+    /// 覆盖用户凭据的可能。
+    ///
+    /// 对真正的 app 没有影响:launchd 给 GUI 进程设的 `$HOME` 就是家目录。
+    private static var home: String {
+        ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
+    }
+
     /// 配置目录。macOS 是 `~/.folotoy/apps/`;iOS 沙盒里没有家目录,用应用
     /// 自己的 Application Support。
     static var directory: URL {
         #if os(macOS)
-        return URL(fileURLWithPath: NSHomeDirectory())
+        return URL(fileURLWithPath: home)
             .appendingPathComponent(".folotoy/apps", isDirectory: true)
         #else
         let base = (try? FileManager.default.url(for: .applicationSupportDirectory,
@@ -54,7 +71,7 @@ enum AppConfigStore {
         if let data = fm.contents(atPath: primary.path) { return data }
 
         #if os(macOS)
-        let legacy = (NSHomeDirectory() as NSString)
+        let legacy = (home as NSString)
             .appendingPathComponent(".folotoy/\(appID).json")
         if let data = fm.contents(atPath: legacy) { return data }
         #endif
