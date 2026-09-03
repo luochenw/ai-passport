@@ -106,12 +106,13 @@ final class MealApp: ObservableObject, RemoteApp {
         let installedHereNow = installedHere
         lock.unlock()
 
-        var screen = Screen()
+        // "没装"这一层由框架画 —— 三个应用以前各写一遍,措辞和 footer
+        // 都不一样。
         guard installedHereNow else {
-            screen.title = "吃饭"
-            screen.text("请先安装应用")
-            return screen
+            return AppOverlay.notInstalled(name).render(title: name)
         }
+
+        var screen = Screen()
         guard value.connected else {
             screen.title = "吃饭"
             screen.text(value.status)

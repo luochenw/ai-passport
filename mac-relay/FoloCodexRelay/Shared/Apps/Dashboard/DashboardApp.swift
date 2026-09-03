@@ -125,13 +125,14 @@ final class DashboardApp: RemoteApp {
 
         guard let d = data else {
             if config == nil {
-                s.text("未配置")
-                s.spacer()
-                s.text("~/.folotoy/dashboard.json")
-                s.text("缺失或格式不对")
-            } else {
-                s.text(status)
+                // 路径由 AppConfigStore 给 —— 以前这里写死 "~/.folotoy/
+                // dashboard.json",配置位置一改这行就开始骗人。
+                return AppOverlay
+                    .notConfigured(what: "还没有配置",
+                                   path: AppConfigStore.displayPath(for: Self.configID))
+                    .render(title: page.title)
             }
+            s.text(status)
             s.footer = "双击确定返回列表"
             return s
         }

@@ -67,9 +67,19 @@ final class CodexApp: RemoteApp {
     /// 没有这个的话,按下确定到内容回来之间屏幕是**一动不动**的 —— 扫会话文件
     /// 要花时间,用户不知道设备收到没有,只会再按一次,于是排队又多一轮。
     private var loading: String?
+
+    /// 现在有没有挡在内容前面的一层。顺序即优先级。
+    private var currentOverlay: AppOverlay? {
+        if let overlay = pinned.overlay { return overlay }
+        if let why = unavailableReason {
+            return .unavailable(reason: why, hint: "把设备连到 Mac 上即可使用")
+        }
+        if let what = loading { return .loading(what) }
+        return nil
+    }
     /// 错误要一直挂着直到用户按键确认,不能被下一次自动刷新悄悄盖掉 ——
     /// 语音发送失败这种事,一闪而过等于没提示。
-    private var pinnedError: String?
+    private var pinned = PinnedError()
 
     // 攒列表用。条目是一条一条推过来的(带 index/total),收齐了才整体替换,
     // 否则界面会在加载过程中一行一行地跳。
@@ -135,7 +145,7 @@ final class CodexApp: RemoteApp {
             loading = nil
             changed = true
         case RelayKind.error:
-            pinnedError = text
+            pinned.set(text)
             loading = nil
             changed = true
         default:
@@ -163,36 +173,13 @@ final class CodexApp: RemoteApp {
         lock.lock()
         defer { lock.unlock() }
 
+        // 三层覆盖("跑不了 / 加载中 / 出错了")在框架里,不在这儿各写一遍。
+        // 优先级也由框架定:错误盖住一切,然后是跑不了,最后才是加载中。
+        if let overlay = currentOverlay {
+            return overlay.render(title: "Codex")
+        }
+
         var s = Screen()
-
-        // 本端跑不了:如实说明,而不是让用户对着一片空白猜。设备侧不知道
-        // 也不需要知道自己连的是 Mac 还是 iPhone —— 它只是显示终端。
-        if let why = unavailableReason {
-            s.title = "Codex"
-            s.spacer()
-            for line in DeviceText.wrap(why, limit: 6) { s.text(line) }
-            s.spacer()
-            s.text("把设备连到 Mac 上即可使用")
-            s.footer = "双击确定返回"
-            return s
-        }
-
-        // 加载中:先给一屏过场,别让用户对着一动不动的屏幕猜。
-        if let what = loading {
-            s.title = "Codex"
-            s.spacer()
-            s.text("  " + what)
-            s.footer = "请稍候"
-            return s
-        }
-
-        // 错误优先,盖住一切。用户按任意键才会清掉(见 handleKey)。
-        if let err = pinnedError {
-            s.title = "出错了"
-            for line in DeviceText.wrap(err, limit: 8) { s.text(line) }
-            s.footer = "按任意键继续"
-            return s
-        }
 
         switch mode {
         case .workspaces:
@@ -232,9 +219,9 @@ final class CodexApp: RemoteApp {
     func handleKey(_ button: RemoteButton, _ event: RemoteButtonEvent) -> Bool {
         lock.lock()
         // 任意键先清掉挂着的错误,并且**只**做这一件事 —— 否则用户为了消掉
-        // 提示按的那一下会顺带翻页,看不清刚才发生了什么。
-        if pinnedError != nil {
-            pinnedError = nil
+        // 提示按的那一下会顺带翻页,看不清刚才发生了什么。这条规则收在
+        // PinnedError.consumeKey 里,三个应用共用同一份。
+        if pinned.consumeKey() {
             lock.unlock()
             return true
         }

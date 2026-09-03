@@ -68,7 +68,8 @@ run_static_checks() {
             tests/test_remote_apps.swift \
             mac-relay/FoloCodexRelay/Shared/Framework/RemoteApps.swift \
             mac-relay/FoloCodexRelay/Shared/Apps/Codex/CodexApp.swift \
-            mac-relay/FoloCodexRelay/Shared/Framework/Protocol.swift
+            mac-relay/FoloCodexRelay/Shared/Framework/Protocol.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/AppOverlay.swift
         # ⚠ 用隔离的 HOME 跑:配置层在 macOS 上会写 ~/.folotoy/<name>.json,
         # 拿真实家目录跑测试会污染(甚至覆盖)用户自己的配置。
         HOME="${test_dir}" "${test_dir}/test_remote_apps"
