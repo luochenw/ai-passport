@@ -46,7 +46,7 @@ final class DeviceSession {
     let appStoreModel: AppStoreModel
     let deviceConfigModel: DeviceConfigModel
     let walkieCapability: WalkieCapability
-    let mealApp: MealApp
+    let mealCapability: MealCapability
 
     private let walkieClient: WalkieClient
     private let voicePipeline: VoiceInputPipeline
@@ -85,9 +85,9 @@ final class DeviceSession {
         // 提醒调度器全局一份:通知是弹给**一个人**看的,跟他手里有几台
         // Passport 无关;而且通知标识符没有设备区分,每台各起一个调度器的话,
         // 后一个 update 会把前一个排好的饭点通知全删掉。
-        mealApp = MealApp(client: shared.mealClient,
-                          deviceKey: deviceID.uuidString,
-                          notifications: shared.mealNotifications)
+        mealCapability = MealCapability(client: shared.mealClient,
+                                        deviceKey: deviceID.uuidString,
+                                        notifications: shared.mealNotifications)
 
         // 语音重组缓冲每台一份。共用的话,B 的 START 会把 A 已经录了几秒的
         // 话直接丢掉,日志里只有一行"丢弃"。
@@ -186,7 +186,11 @@ final class DeviceSession {
             walkieCapability.notify = { [weak app] text in app?.notify?(text) }
             remoteHost.register(app)
         }
-        remoteHost.register(mealApp)
+        if let manifest = ManifestStore.load(MealCapability.id) {
+            let app = ManifestApp(manifest: manifest, capability: mealCapability)
+            mealCapability.notify = { [weak app] text in app?.notify?(text) }
+            remoteHost.register(app)
+        }
 
         #if os(macOS)
         let codexApp = CodexApp(browser: codexBrowser)

@@ -1,12 +1,22 @@
 import Foundation
 import SwiftUI
 
-final class MealApp: ObservableObject, RemoteApp {
+// 这个文件现在是**能力**,不是应用。
+//
+// 屏幕布局在 AppManifests/meal.json 里。留在这里的是清单描述不了的:
+// 从一周菜单里解析出"今天这一餐"、按菜品推荐楼层、文字折行,以及伴侣端
+// 那个 SwiftUI 设置页的 @Published 模型。
+//
+// 分界很清楚:**算**出该显示什么留在这儿,**怎么摆**交给清单。折行和楼层
+// 归并是真计算,把它们塞进模板语言只会让那个语言长成半个编程语言。
+final class MealCapability: ObservableObject, AppCapability {
+    static let id = "meal"
+    /// 只留给 `.notInstalled` 那一屏的标题用 —— 名字、说明、图标现在都在
+    /// 清单里,这里不再重复一份(重复的那份迟早跟清单对不上)。
     let name = "吃饭"
-    let detail = "本周菜单与楼层推荐"
-    let defaultIcon = DeviceIcon.find("\u{F0C9}").glyph
-    let settingsRoute: RemoteAppSettingsRoute? = .meal
-    var requestPush: (() -> Void)?
+
+    var onChange: (() -> Void)?
+    /// 饭点提醒走 cmd.notify,跟屏幕是两条路。由解释器注入。
     var notify: ((String) -> Void)?
 
     @Published var serverAddress: String
@@ -50,7 +60,7 @@ final class MealApp: ObservableObject, RemoteApp {
             self.lock.unlock()
             self.snapshot = value
             self.notifications.update(enabled: value.installed, weeks: value.weeks)
-            self.requestPush?()
+            self.onChange?()
         }
         client.addReminderObserver { [weak self] reminder in
             self?.notify?(reminder.message)
@@ -75,30 +85,38 @@ final class MealApp: ObservableObject, RemoteApp {
             selectedDate = Self.defaultDay(in: deviceSnapshot.weeks)?.date ?? ""
         }
         lock.unlock()
-        requestPush?()
+        onChange?()
     }
 
-    func handleKey(_ button: RemoteButton, _ event: RemoteButtonEvent) -> Bool {
-        guard event == .click || event == .hold else { return false }
-        lock.lock()
-        defer { lock.unlock() }
-        switch button {
-        case .up, .down:
-            let delta = button == .up ? -1 : 1
-            guard let nextDate = MealDateNavigation.nextDate(
-                in: deviceSnapshot.weeks, current: selectedDate, delta: delta
-            ) else {
-                return false
-            }
-            selectedDate = nextDate
+    /// 清单里 `up/down.click` 换天、`ok.click` 切午/晚餐。
+    @discardableResult
+    func perform(_ action: String) -> Bool {
+        switch action {
+        case "prevDay": return shiftDay(-1)
+        case "nextDay": return shiftDay(1)
+        case "togglePeriod":
+            lock.lock(); dinner.toggle(); lock.unlock()
             return true
-        case .ok:
-            dinner.toggle()
-            return true
+        default: return false
         }
     }
 
-    func render() -> Screen {
+    private func shiftDay(_ delta: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let next = MealDateNavigation.nextDate(
+            in: deviceSnapshot.weeks, current: selectedDate, delta: delta
+        ) else { return false }
+        selectedDate = next
+        return true
+    }
+
+    /// 交给模板取值的那棵树。
+    ///
+    /// **算**出该显示什么在这里做完(哪一天、哪一餐、折行、楼层归并),
+    /// 清单只管怎么摆。这条界线是刻意的:折行和归并是真计算,塞进模板
+    /// 语言只会让那个语言长成半个编程语言。
+    func state() -> JSONValue {
         lock.lock()
         let value = deviceSnapshot
         let date = selectedDate
@@ -106,54 +124,44 @@ final class MealApp: ObservableObject, RemoteApp {
         let installedHereNow = installedHere
         lock.unlock()
 
-        // "没装"这一层由框架画 —— 三个应用以前各写一遍,措辞和 footer
-        // 都不一样。
-        guard installedHereNow else {
-            return AppOverlay.notInstalled(name).render(title: name)
-        }
+        var root: [String: JSONValue] = [
+            "installed": .bool(installedHereNow),
+            "connected": .bool(value.connected),
+            "status": .string(value.status),
+            "multiDay": .bool(MealDateNavigation.dates(in: value.weeks).count > 1),
+            "period": .string(showDinner ? "晚餐" : "午餐"),
+            "date": .string(date),
+        ]
 
-        var screen = Screen()
-        guard value.connected else {
-            screen.title = "吃饭"
-            screen.text(value.status)
-            screen.footer = "请检查本地服务"
-            return screen
-        }
         guard let week = value.weeks.first, !date.isEmpty else {
-            screen.title = "吃饭"
-            screen.text("本周菜单还没更新")
-            screen.footer = "周一 11:00 自动更新"
-            return screen
+            root["hasMenu"] = .bool(false)
+            return .object(root)
         }
+        root["hasMenu"] = .bool(true)
 
         guard let day = week.days.first(where: { $0.date == date }) else {
-            let weekday = MealDateNavigation.weekday(for: date)
-            screen.title = "\(weekday) \(showDinner ? "晚餐" : "午餐")"
-            screen.text("当日菜单未归档")
-            screen.text(date)
-            screen.footer = "上/下换天  确定午/晚"
-            return screen
+            // 这一天没归档:标题还是要显示星期几,否则用户不知道自己翻到哪儿了。
+            root["hasDay"] = .bool(false)
+            root["weekday"] = .string(MealDateNavigation.weekday(for: date))
+            return .object(root)
         }
+        root["hasDay"] = .bool(true)
+        root["weekday"] = .string(day.weekday)
 
-        let period = showDinner ? day.dinner : day.lunch
-        screen.title = "\(day.weekday) \(showDinner ? "晚餐" : "午餐")"
-        screen.text("推荐  \(period.recommendedFloor.isEmpty ? "暂无" : period.recommendedFloor)")
-        if !period.recommendation.isEmpty {
-            for line in DeviceText.wrap(period.recommendation, limit: 2) {
-                screen.text(line)
-            }
-        }
-        screen.spacer()
-        let floors = Self.floorSummary(period.outlets)
-        for floor in floors.prefix(5) {
-            screen.text(floor)
-        }
-        screen.footer = MealDateNavigation.dates(in: value.weeks).count > 1
-            ? "上/下换天  确定午/晚"
-            : "仅今日菜单  确定午/晚"
-        return screen
+        let p = showDinner ? day.dinner : day.lunch
+        root["floor"] = .string(p.recommendedFloor.isEmpty ? "暂无" : p.recommendedFloor)
+        root["recommendation"] = .array(
+            p.recommendation.isEmpty ? []
+                : DeviceText.wrap(p.recommendation, limit: 2).map { JSONValue.string($0) })
+        root["floors"] = .array(Self.floorSummary(p.outlets).map { JSONValue.string($0) })
+        return .object(root)
     }
 
+    /// 没装在这一台上的时候由框架画那一屏。
+    var overlay: AppOverlay? {
+        lock.lock(); let here = installedHere; lock.unlock()
+        return here ? nil : .notInstalled(name)
+    }
     func saveAndReconnect() {
         client.configure(server: serverAddress)
     }
@@ -197,7 +205,7 @@ final class MealApp: ObservableObject, RemoteApp {
 }
 
 struct MealSettingsView: View {
-    @ObservedObject var model: MealApp
+    @ObservedObject var model: MealCapability
 
     var body: some View {
         Form {

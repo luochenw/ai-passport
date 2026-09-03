@@ -88,7 +88,7 @@ private struct SessionView: View {
                             WalkieTalkieView(model: session.walkieCapability)
                                 .navigationTitle("对讲机设置")
                         case .meal:
-                            MealSettingsView(model: session.mealApp)
+                            MealSettingsView(model: session.mealCapability)
                                 .navigationTitle("吃饭设置")
                         }
                     }

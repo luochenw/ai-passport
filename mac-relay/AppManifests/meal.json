@@ -1,0 +1,43 @@
+{
+  "id": "meal",
+  "name": "吃饭",
+  "detail": "本周菜单与楼层推荐",
+  "icon": "",
+  "capability": "meal",
+  "settings": "meal",
+
+  "keys": {
+    "up":   { "click": "prevDay", "hold": "prevDay" },
+    "down": { "click": "nextDay", "hold": "nextDay" },
+    "ok":   { "click": "togglePeriod" }
+  },
+
+  "screens": [
+    {
+      "title": "{{weekday|default:吃饭}} {{period}}",
+      "footer": "{{multiDay|pick:上下换天  确定午晚/仅今日菜单  确定午晚}}",
+      "rows": [
+        { "when": { "cond": "!connected",
+                    "then": [ { "text": "{{status}}" } ],
+                    "else": [
+          { "when": { "cond": "!hasMenu",
+                      "then": [ { "text": "本周菜单还没更新" } ],
+                      "else": [
+            { "when": { "cond": "!hasDay",
+                        "then": [
+              { "text": "当日菜单未归档" },
+              { "text": "{{date}}" }
+            ], "else": [
+              { "text": "推荐  {{floor}}" },
+              { "each": { "path": "recommendation", "limit": 2,
+                          "body": [ { "text": "{{item}}" } ] } },
+              { "spacer": true },
+              { "each": { "path": "floors", "limit": 5,
+                          "body": [ { "text": "{{item}}" } ] } }
+            ] } }
+          ] } }
+        ] } }
+      ]
+    }
+  ]
+}
