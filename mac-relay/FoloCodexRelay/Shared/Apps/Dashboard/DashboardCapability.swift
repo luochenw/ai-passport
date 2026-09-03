@@ -11,32 +11,22 @@ import Security
 // 整个应用就是这一个文件,几百行 Swift,没有一行嵌入式代码。
 // =====================================================================
 
-final class DashboardApp: RemoteApp {
-    let name = "服务器面板"
-    // 服务器面板 —— 用硬盘/服务器那个图标。
-    let defaultIcon = DeviceIcon.find("\u{F01C}").glyph
-    let detail = "NAS 状态"
-    var requestPush: (() -> Void)?
-    var notify: ((String) -> Void)?
+// 这个文件现在是**能力**,不是应用。
+//
+// 应用(名字、图标、五页长什么样、按键怎么绑)在 dashboard.json 那份清单里,
+// 从 GitHub 更新。留在这里的是清单描述不了的部分:带客户端证书校验的 HTTPS
+// 请求、后台轮询定时器、以及那份口令配置的读取。
+//
+// 拆开之后 render() 整个消失了 —— 那 60 行 switch 变成了清单里的五屏声明。
+final class DashboardCapability: AppCapability {
+    static let id = "dashboard"
 
-    private enum Page: Int, CaseIterable {
-        case overview, download, media, network, containers
-        var title: String {
-            switch self {
-            case .overview:   return "总览"
-            case .download:   return "下载"
-            case .media:      return "媒体库"
-            case .network:    return "网络"
-            case .containers: return "容器"
-            }
-        }
-    }
+    var onChange: (() -> Void)?
 
     /// 刷新间隔。只在用户正看着这个应用时才走这个定时器(setActive 里起停),
     /// 所以 5 秒的频率不会在没人看的时候空转打接口。
     private static let refreshInterval: TimeInterval = 5
 
-    private var page: Page = .overview
     private var data: DashboardData?
     private var status = "正在获取…"
     private var timer: DispatchSourceTimer?
@@ -84,7 +74,6 @@ final class DashboardApp: RemoteApp {
     func setActive(_ active: Bool) {
         queue.async {
             if active {
-                self.page = .overview
                 self.fetch()
                 // 用户在看的时候才轮询。走开就停 —— 没人看还定期打接口纯属浪费。
                 let t = DispatchSource.makeTimerSource(queue: self.queue)
@@ -100,104 +89,33 @@ final class DashboardApp: RemoteApp {
         }
     }
 
-    func handleKey(_ button: RemoteButton, _ event: RemoteButtonEvent) -> Bool {
-        guard event == .click || event == .hold else { return false }
-        switch button {
-        case .up:
-            let all = Page.allCases
-            let i = (page.rawValue - 1 + all.count) % all.count
-            page = all[i]
-            return true
-        case .down:
-            let all = Page.allCases
-            page = all[(page.rawValue + 1) % all.count]
-            return true
-        case .ok:
-            status = "正在刷新…"
-            queue.async { self.fetch() }
-            return true
-        }
+    /// 清单里 `ok.click` 绑到这儿。翻页不在这里 —— 那是解释器按清单的
+    /// 屏数自己做的,能力不需要知道自己被画成了几屏。
+    @discardableResult
+    func perform(_ action: String) -> Bool {
+        guard action == "refresh" else { return false }
+        status = "正在刷新…"
+        queue.async { self.fetch() }
+        return true
     }
 
-    func render() -> Screen {
-        var s = Screen()
-        s.title = "\(page.title)  \(page.rawValue + 1)/\(Page.allCases.count)"
-
-        guard let d = data else {
-            if config == nil {
-                // 路径由 AppConfigStore 给 —— 以前这里写死 "~/.folotoy/
-                // dashboard.json",配置位置一改这行就开始骗人。
-                return AppOverlay
-                    .notConfigured(what: "还没有配置",
-                                   path: AppConfigStore.displayPath(for: Self.configID))
-                    .render(title: page.title)
-            }
-            s.text(status)
-            s.footer = "双击确定返回列表"
-            return s
-        }
-
-        switch page {
-        case .overview:
-            s.bar("CPU", percent: d.cpuPercent)
-            s.bar("内存 \(d.memUsed)/\(d.memTotal)", percent: d.memPercent)
-            for disk in d.disks {
-                s.bar("\(disk.label) \(disk.used)/\(disk.total)", percent: disk.usedPercent)
-            }
-            s.spacer()
-            s.text(String(format: "负载 %.2f / %.2f / %.2f", d.load1, d.load5, d.load15))
-
-        case .download:
-            if d.aria2OK {
-                s.text("下行  \(d.downSpeed)")
-                s.text("上行  \(d.upSpeed)")
-                s.spacer()
-                s.text("进行中   \(d.active)")
-                s.text("等待中   \(d.waiting)")
-                s.text("已完成   \(d.stopped)")
-            } else {
-                s.text("下载器未运行")
-            }
-
-        case .media:
-            if d.mediaOK {
-                s.text("电影   \(d.movies)")
-                s.text("剧集   \(d.series)")
-                s.text("集数   \(d.episodes)")
-                s.spacer()
-                s.text("正在播放   \(d.nowPlaying)")
-            } else {
-                s.text("媒体库未运行")
-            }
-
-        case .network:
-            s.text("节点")
-            s.text(d.node.isEmpty ? "-" : d.node)
-            s.spacer()
-            s.text("连接数   \(d.connections)")
-            s.text(String(format: "累计上行 %.1f GB", d.upTotalGB))
-            s.text(String(format: "累计下行 %.1f GB", d.downTotalGB))
-            s.spacer()
-            s.text("Tailscale  \(d.tailscaleOK ? "在线" : "离线")")
-            s.text("frp        \(d.frpOK ? "已连接" : "断开")")
-
-        case .containers:
-            if d.containers.isEmpty {
-                s.text("没有容器")
-            } else {
-                for c in d.containers.prefix(10) {
-                    s.text("\(c.healthy ? "+" : "x") \(c.name)")
-                }
-            }
-        }
-
-        if page == .containers {
-            let running = d.containers.filter { $0.running }.count
-            s.footer = "运行 \(running)/\(d.containers.count)  上/下翻页"
+    /// 交给模板取值的那棵树。
+    func snapshot() -> JSONValue {
+        var root: [String: JSONValue] = ["status": .string(status)]
+        if let d = data, case let .object(fields) = JSONValue.from(d) {
+            root.merge(fields) { _, new in new }
+            root["hasData"] = .bool(true)
         } else {
-            s.footer = "上/下翻页  确定刷新"
+            root["hasData"] = .bool(false)
         }
-        return s
+        return .object(root)
+    }
+
+    /// 没配置的时候由框架画那一屏 —— 措辞和 footer 要跟别的应用一致。
+    var overlay: AppOverlay? {
+        guard config == nil else { return nil }
+        return .notConfigured(what: "还没有配置",
+                              path: AppConfigStore.displayPath(for: Self.configID))
     }
 
     // MARK: 取数据
@@ -235,25 +153,25 @@ final class DashboardApp: RemoteApp {
                     self.status = Self.requestFailureText(nsError)
                     log("[dashboard] 请求失败 code=\(nsError.code) " +
                         "host=\(url.host ?? "-"): \(nsError.localizedDescription)")
-                    self.requestPush?()
+                    self.onChange?()
                     return
                 }
                 if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
                     self.status = "服务器返回 HTTP \(http.statusCode)"
-                    self.requestPush?()
+                    self.onChange?()
                     return
                 }
                 guard let body = body,
                       let parsed = DashboardData(json: body) else {
                     self.status = "返回的不是预期的 JSON"
                     log("[dashboard] 返回内容不是预期 JSON host=\(url.host ?? "-")")
-                    self.requestPush?()
+                    self.onChange?()
                     return
                 }
                 self.data = parsed
                 self.status = ""
                 log("[dashboard] 获取成功 host=\(url.host ?? "-") bytes=\(body.count)")
-                self.requestPush?()
+                self.onChange?()
             }
         }.resume()
     }
@@ -362,9 +280,9 @@ final class DashboardServerTrustDelegate: NSObject, URLSessionTaskDelegate {
 
 // MARK: - 数据模型
 
-struct DashboardData {
-    struct Disk { let label: String; let usedPercent: Double; let used: String; let total: String }
-    struct Container { let name: String; let running: Bool; let healthy: Bool }
+struct DashboardData: Encodable {
+    struct Disk: Encodable { let label: String; let usedPercent: Double; let used: String; let total: String }
+    struct Container: Encodable { let name: String; let running: Bool; let healthy: Bool }
 
     var aria2OK = false
     var downSpeed = "-", upSpeed = "-"

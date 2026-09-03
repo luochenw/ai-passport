@@ -171,7 +171,14 @@ final class DeviceSession {
         // 应用实例每会话各 new 一份。RemoteApp 的 requestPush / notify 都是
         // 单槽赋值,一份实例结构上就服务不了两个 host —— 共用的话第二个
         // host 的注入会静默覆盖第一个,第一台的那个应用从此推不出任何东西。
-        remoteHost.register(DashboardApp())
+        // 看板是第一个**清单应用**:名字、图标、五页长什么样、按键怎么绑
+        // 都在 AppManifests/dashboard.json 里,这边只提供它描述不了的那部分
+        // (带证书校验的 HTTPS 请求 + 轮询)。清单读不到就跳过 —— 注册一个
+        // 画不出东西的空壳,比首屏少一个图标更难查。
+        if let manifest = ManifestStore.load(DashboardCapability.id) {
+            remoteHost.register(ManifestApp(manifest: manifest,
+                                            capability: DashboardCapability()))
+        }
         remoteHost.register(walkieApp)
         remoteHost.register(mealApp)
 

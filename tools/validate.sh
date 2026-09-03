@@ -85,6 +85,22 @@ run_static_checks() {
             mac-relay/FoloCodexRelay/Shared/Apps/Walkie/WalkieProtocol.swift
         HOME="${test_dir}" "${test_dir}/test_walkie_client"
 
+        # 清单解释器:模板求值、条件、遍历、翻页、坏清单的容错。
+        # 这一层是"从 GitHub 更新应用"的执行入口 —— 它错了,错的方式是
+        # 设备上某一行悄悄变空,而不是任何人会看到的报错。
+        swiftc -o "${test_dir}/test_manifest" \
+            tests/test_manifest.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Manifest/JSONValue.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Manifest/Template.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Manifest/AppManifest.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Manifest/AppCapability.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Manifest/ManifestApp.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/AppOverlay.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/RemoteApps.swift \
+            mac-relay/FoloCodexRelay/Shared/Apps/Codex/CodexApp.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/Protocol.swift
+        "${test_dir}/test_manifest"
+
         swiftc -o "${test_dir}/test_meal_client" \
             tests/test_meal_client.swift \
             mac-relay/FoloCodexRelay/Shared/Apps/Meal/MealClient.swift \

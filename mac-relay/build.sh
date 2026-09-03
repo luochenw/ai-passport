@@ -34,6 +34,11 @@ swiftc $SOURCES \
 #除可执行文件以外的东西当成"未签名的子组件"报错,Resources 才是普通数据
 # 文件该待的地方。AppStore.swift 的 resolveCatalogDir() 会优先找源码旁边
 # 那份(开发时直接跑 swiftc 产物),找不到就退回这里(双击打包好的 .app 时)。
+# 内置清单跟着 app 走。这一份是**兜底**:第一次装、没网、GitHub 打不开的
+# 时候,应用必须照常能用。从网上更新是锦上添花,不能是运行的前提。
+mkdir -p "$APP/Contents/Resources/AppManifests"
+cp AppManifests/*.json "$APP/Contents/Resources/AppManifests/" 2>/dev/null || true
+
 mkdir -p "$APP/Contents/Resources/AppCatalog"
 cp -R AppCatalog/. "$APP/Contents/Resources/AppCatalog/" 2>/dev/null || true
 
