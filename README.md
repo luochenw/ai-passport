@@ -12,10 +12,10 @@ the device as a **display terminal** and runs the applications on a paired
 Mac or iPhone, which pushes screens over BLE as short text descriptions:
 
 ```
-T对讲机                 title
-L房间  local            a body row
-L在线  2 人
-H按住下键讲话           footer
+TWalkie-talkie          title
+LRoom   local           a body row
+LOnline 2               another row
+HHold DOWN to talk      footer
 W1                      this screen accepts push-to-talk
 ```
 
