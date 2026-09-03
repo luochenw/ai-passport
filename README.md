@@ -73,6 +73,32 @@ device time than the rest. iOS Push to Talk entitlements are **off by default**
 because free Apple developer accounts cannot sign them — set `WALKIE_PTT=1` if
 you have a paid team with Apple's PTT authorization.
 
+## Attribution
+
+GitHub ranks contributors by commit count, which is misleading here: upstream's
+history spans a hundred-odd commits while the work in this repository landed in
+a handful. `git blame` over the current tree tells the real story
+(generated font tables excluded):
+
+| Path | This repository | Upstream |
+| --- | ---: | ---: |
+| `main/` — firmware application layer | **7,113** | 930 |
+| `mac-relay/` — companion app | **6,628** | 0 |
+| `services/` — walkie-talkie server | **1,114** | 0 |
+| `tests/` | **683** | 83 |
+| `tools/` | 492 | 522 |
+| `components/` — board support | 45 | **936** |
+| `docs/` — hardware guides | 23 | **5,954** |
+
+What genuinely comes from [FoloToy/ai-passport](https://github.com/FoloToy/ai-passport):
+the board-support layer (pin map, bus setup, display and audio init) and the
+hardware documentation. Those are load-bearing — this fork would not boot
+without them, and their authors are kept in the commit history for that reason.
+
+Everything above the board layer — the resident BLE hub, remote-UI renderer,
+status bar, notifications, Wi-Fi manager, OTA, the whole companion app and the
+walkie-talkie service — was written here.
+
 ## License
 
 MIT, inherited from the upstream project — see [`LICENSE`](LICENSE).
