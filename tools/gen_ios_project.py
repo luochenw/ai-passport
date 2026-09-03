@@ -20,6 +20,32 @@ SRC_DIR = "FoloCodexRelay/Shared"
 PROJ = os.path.join(ROOT, REL, "FoloCodexRelay.xcodeproj")
 
 
+def ptt_entitlements():
+    """要不要把 Push to Talk / 推送的 entitlement 编进工程。
+
+    **默认不编**,因为免费的个人开发者 team 拿不到这两项能力,Xcode 会直接
+    拒绝生成描述文件:
+
+        Personal development teams, including "...", do not support the
+        Push to Talk and Push Notifications capabilities.
+
+    而这个 target 是整个仓库唯一的 iOS target —— 一旦签名失败,BLE 中继、
+    配置页、固件页**全都装不上**,不只是对讲机。用免费账号的人会看到一堆
+    描述文件报错,而完全猜不到根因是对讲机的后台唤醒能力。
+
+    关掉之后对讲机照常能用:SystemPushToTalk 初始化失败会退回前台模式
+    (SystemPushToTalk.swift:49/53),WalkieClient 每处使用都用
+    systemPTTAvailable?() 守着。代价只是 iOS 上收不到后台来话唤醒。
+
+    有付费账号、并且已经向 Apple 申请到 PTT 授权的话:
+
+        WALKIE_PTT=1 ./install-ios.sh
+    """
+    if os.environ.get("WALKIE_PTT", "").lower() in ("1", "true", "yes"):
+        return '\n\t\t\t\tCODE_SIGN_ENTITLEMENTS = "FoloCodexRelay/FoloCodexRelay.entitlements";'
+    return ""
+
+
 def uid(*parts):
     """稳定的 24 位十六进制 ID。pbxproj 要求 12 字节。"""
     h = hashlib.md5("|".join(parts).encode()).hexdigest()
@@ -49,6 +75,15 @@ def main():
         )
         src_children.append(f'\t\t\t\t{fref} /* {name} */,')
         phase_files.append(f'\t\t\t\t{bfile} /* {name} in Sources */,')
+
+    ptt = ptt_entitlements()
+
+    if not ptt:
+
+        print("  Push to Talk entitlement: 关(免费账号装不上带这个的 app)")
+
+        print("    要开:WALKIE_PTT=1,需要付费 team + Apple 的 PTT 授权")
+
 
     ids = {k: uid(k) for k in (
         "project", "target", "product", "maingroup", "sharedgroup",
@@ -249,8 +284,7 @@ def main():
 			buildSettings = {{
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
 				APS_ENVIRONMENT = development;
-				CODE_SIGN_STYLE = Automatic;
-				CODE_SIGN_ENTITLEMENTS = "FoloCodexRelay/FoloCodexRelay.entitlements";
+				CODE_SIGN_STYLE = Automatic;{ptt}
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "FoloCodexRelay/Info-iOS.plist";
@@ -268,8 +302,7 @@ def main():
 			buildSettings = {{
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
 				APS_ENVIRONMENT = production;
-				CODE_SIGN_STYLE = Automatic;
-				CODE_SIGN_ENTITLEMENTS = "FoloCodexRelay/FoloCodexRelay.entitlements";
+				CODE_SIGN_STYLE = Automatic;{ptt}
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "FoloCodexRelay/Info-iOS.plist";

@@ -16,6 +16,9 @@
 		08A7556B1FDF7260041FAFF2 /* DeviceConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB5544CA16CD1A1A52789345 /* DeviceConfig.swift */; };
 		9EC3DF3047056FA988DA662D /* IMAADPCM.swift in Sources */ = {isa = PBXBuildFile; fileRef = 593F608D0F468F902419F2EC /* IMAADPCM.swift */; };
 		A876F242BE5425DBB659C629 /* Logging.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6650DA0ABED18571A7317544 /* Logging.swift */; };
+		1E80C9B6D406FB5C6BB3C8F9 /* MealApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81703182FCB8BAE78FC03D2D /* MealApp.swift */; };
+		65C5BDE88B2DFA6F868004F2 /* MealClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B04D9266AFEBD9DA3309937 /* MealClient.swift */; };
+		22BC8DC044CEC8E84EAD9F68 /* MealProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 721B8EF510C1C2256962EDAB /* MealProtocol.swift */; };
 		1F3A3EB2492B79A2AC84FACE /* Protocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1169000175CB15640341EFF4 /* Protocol.swift */; };
 		AA46F432507A666898E23304 /* RelayApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE8DA103969577510C0844D8 /* RelayApp.swift */; };
 		DE42ADE9E186ADF5CB2865EB /* RemoteApps.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB964059B2DD26BE7065C711 /* RemoteApps.swift */; };
@@ -37,6 +40,9 @@
 		BB5544CA16CD1A1A52789345 /* DeviceConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceConfig.swift; sourceTree = "<group>"; };
 		593F608D0F468F902419F2EC /* IMAADPCM.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IMAADPCM.swift; sourceTree = "<group>"; };
 		6650DA0ABED18571A7317544 /* Logging.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Logging.swift; sourceTree = "<group>"; };
+		81703182FCB8BAE78FC03D2D /* MealApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MealApp.swift; sourceTree = "<group>"; };
+		1B04D9266AFEBD9DA3309937 /* MealClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MealClient.swift; sourceTree = "<group>"; };
+		721B8EF510C1C2256962EDAB /* MealProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MealProtocol.swift; sourceTree = "<group>"; };
 		1169000175CB15640341EFF4 /* Protocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Protocol.swift; sourceTree = "<group>"; };
 		BE8DA103969577510C0844D8 /* RelayApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayApp.swift; sourceTree = "<group>"; };
 		EB964059B2DD26BE7065C711 /* RemoteApps.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteApps.swift; sourceTree = "<group>"; };
@@ -71,6 +77,9 @@
 				BB5544CA16CD1A1A52789345 /* DeviceConfig.swift */,
 				593F608D0F468F902419F2EC /* IMAADPCM.swift */,
 				6650DA0ABED18571A7317544 /* Logging.swift */,
+				81703182FCB8BAE78FC03D2D /* MealApp.swift */,
+				1B04D9266AFEBD9DA3309937 /* MealClient.swift */,
+				721B8EF510C1C2256962EDAB /* MealProtocol.swift */,
 				1169000175CB15640341EFF4 /* Protocol.swift */,
 				BE8DA103969577510C0844D8 /* RelayApp.swift */,
 				EB964059B2DD26BE7065C711 /* RemoteApps.swift */,
@@ -180,6 +189,9 @@
 				08A7556B1FDF7260041FAFF2 /* DeviceConfig.swift in Sources */,
 				9EC3DF3047056FA988DA662D /* IMAADPCM.swift in Sources */,
 				A876F242BE5425DBB659C629 /* Logging.swift in Sources */,
+				1E80C9B6D406FB5C6BB3C8F9 /* MealApp.swift in Sources */,
+				65C5BDE88B2DFA6F868004F2 /* MealClient.swift in Sources */,
+				22BC8DC044CEC8E84EAD9F68 /* MealProtocol.swift in Sources */,
 				1F3A3EB2492B79A2AC84FACE /* Protocol.swift in Sources */,
 				AA46F432507A666898E23304 /* RelayApp.swift in Sources */,
 				DE42ADE9E186ADF5CB2865EB /* RemoteApps.swift in Sources */,
@@ -240,7 +252,6 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
 				APS_ENVIRONMENT = development;
 				CODE_SIGN_STYLE = Automatic;
-				CODE_SIGN_ENTITLEMENTS = "FoloCodexRelay/FoloCodexRelay.entitlements";
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "FoloCodexRelay/Info-iOS.plist";
@@ -259,7 +270,6 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
 				APS_ENVIRONMENT = production;
 				CODE_SIGN_STYLE = Automatic;
-				CODE_SIGN_ENTITLEMENTS = "FoloCodexRelay/FoloCodexRelay.entitlements";
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "FoloCodexRelay/Info-iOS.plist";
