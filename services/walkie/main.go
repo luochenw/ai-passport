@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/FoloToy/ai-passport/services/internal/wsx"
 	"github.com/coder/websocket"
 	"github.com/sideshow/apns2"
 	"github.com/sideshow/apns2/token"
@@ -277,9 +278,9 @@ func (s *walkieServer) handleControl(c *client, data []byte) error {
 }
 
 func (s *walkieServer) join(c *client, message controlMessage) error {
-	roomName := cleanField(message.Room, 48)
-	name := cleanField(message.Name, 48)
-	clientID := cleanField(message.ClientID, 96)
+	roomName := wsx.CleanField(message.Room, 48)
+	name := wsx.CleanField(message.Name, 48)
+	clientID := wsx.CleanField(message.ClientID, 96)
 	if roomName == "" || name == "" || clientID == "" {
 		return errors.New("room, name, and clientId are required")
 	}
@@ -656,21 +657,6 @@ func (s *walkieServer) saveRegistrationsLocked() {
 	}
 }
 
-func cleanField(value string, max int) string {
-	value = strings.TrimSpace(value)
-	value = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return -1
-		}
-		return r
-	}, value)
-	runes := []rune(value)
-	if len(runes) > max {
-		value = string(runes[:max])
-	}
-	return value
-}
-
 func cleanHexToken(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if value == "" {
@@ -721,10 +707,14 @@ func newPushSenderFromEnvironment() (pushSender, error) {
 	}, nil
 }
 
+// 对讲服务。只管实时音频转发和抢麦。
+//
+// 吃饭以前挂在同一个二进制的 /v1/meals/* 上,现在是 services/meal 里独立的
+// 一个服务、独立的端口。两件事没有任何共同状态,挂在一起只是历史 —— 而且
+// 挂在一起意味着改吃饭的菜单解析要重启所有人的对讲。
 func main() {
 	listen := flag.String("listen", "0.0.0.0:8787", "HTTP listen address")
 	statePath := flag.String("state", defaultStatePath(), "path for persisted PTT push tokens")
-	mealStatePath := flag.String("meal-state", defaultMealStatePath(), "path for weekly meal menus")
 	flag.Parse()
 
 	push, err := newPushSenderFromEnvironment()
@@ -732,16 +722,10 @@ func main() {
 		log.Fatal(err)
 	}
 	server := newWalkieServerWithState(os.Getenv("WALKIE_SHARED_TOKEN"), push, *statePath)
-	meals := newMealHub(*mealStatePath)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", server.handleHealth)
 	mux.HandleFunc("/v1/ws", server.handleWebSocket)
-	mux.HandleFunc("/v1/meals/ws", meals.handleWebSocket)
-	mux.HandleFunc("/v1/meals/current", meals.handleCurrent)
-	mux.HandleFunc("/v1/meals/weeks", meals.handleWeeks)
-	mux.HandleFunc("/v1/meals/update", meals.handleUpdate)
-	mux.HandleFunc("/v1/meals/remind", meals.handleRemind)
 
 	httpServer := &http.Server{
 		Addr:              *listen,

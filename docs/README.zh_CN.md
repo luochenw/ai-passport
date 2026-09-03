@@ -98,7 +98,9 @@ components/bsp/include/  BSP 公开 API 与 bsp_pins.h 硬件事实
 components/bsp/src/      显示、按键、音频、电池、共享 I2C 实现
 main/                    最小菜单、LVGL UI 与独立硬件演示页
 mac-relay/               macOS/iOS 共用伴侣应用与 BLE 中继
-services/walkie-server/  本地实时房间中继与可选 iOS PTT 唤醒推送
+services/walkie/        本地实时房间中继与可选 iOS PTT 唤醒推送
+services/meal/          每周菜单、楼层推荐与饭点提醒
+services/internal/wsx/  两个服务真正共用的那一点点
 tests/                   可脱离硬件运行的轻量逻辑测试源
 tools/                   本地与 CI 共用的验证及固件校验脚本
 docs/                    项目说明、变更记录、工程/协作规范与设计参考
@@ -120,7 +122,8 @@ LICENSE                  仓库许可证
 - [`docs/hardware-design/`](hardware-design/README.zh_CN.md) — 板卡事实、约束、验收矩阵与排障。
 - [`docs/reference/`](reference/README.zh_CN.md) — 参考资料：按贡献者（`reference/<username>/`）组织可复用开发经验与已归档应用于册。
 - [`docs/brand/`](brand/README.zh_CN.md) — 公开品牌与产品语言（`brand-and-product.zh_CN.md`）与官方产品视觉参考。
-- [`services/walkie-server/`](../services/walkie-server/README.zh_CN.md) — 本地半双工音频中继与可选 Apple Push to Talk 唤醒配置。
+- [`services/walkie/`](../services/walkie/README.zh_CN.md) — 本地半双工音频中继与可选 Apple Push to Talk 唤醒配置。
+- [`services/meal/`](../services/meal/README.zh_CN.md) — 每周菜单、楼层推荐与饭点提醒。独立二进制、独立端口:两个服务没有任何共同状态,挂在一起意味着改一次菜单解析要重启所有人的对讲。
 - [`docs/`](README.zh_CN.md) 顶层 — [`CHANGELOG.zh_CN.md`](CHANGELOG.zh_CN.md)、[`brand-and-product.zh_CN.md`](brand/brand-and-product.zh_CN.md)、[`fork-guide.zh_CN.md`](fork-guide.zh_CN.md)。
 
 GitHub 社区治理文档：[CONTRIBUTING.zh_CN.md](../.github/CONTRIBUTING.zh_CN.md)、[CODE_OF_CONDUCT.zh_CN.md](../.github/CODE_OF_CONDUCT.zh_CN.md)、[SECURITY.zh_CN.md](../.github/SECURITY.zh_CN.md)、[SUPPORT.zh_CN.md](../.github/SUPPORT.zh_CN.md)。

@@ -270,18 +270,17 @@ final class MealClient {
            let url = mealEndpoint(from: config.server) {
             return url.absoluteString
         }
-        if let url = Bundle.main.url(forResource: "meal", withExtension: "json"),
-           let data = try? Data(contentsOf: url),
-           let config = try? JSONDecoder().decode(Config.self, from: data),
-           let endpoint = mealEndpoint(from: config.server) {
-            return endpoint.absoluteString
-        }
-        let walkieServer = defaults.string(forKey: "walkie.server") ?? ""
-        if let endpoint = mealEndpoint(from: walkieServer) {
-            return endpoint.absoluteString
-        }
+        // ⚠ 这里以前还有两条回退,都删了:
+        //
+        //  · 直接读 bundle 里的 meal.json —— AppConfigStore 已经把 bundle
+        //    当成最后一档来源了,重复一遍只会让"到底读到了哪一份"变模糊。
+        //  · 拿**对讲**服务器的地址推导吃饭地址。那是两个服务同处一个二进制
+        //    时代的产物:同一个 host 同一个端口,换个路径就行。现在吃饭是
+        //    services/meal 里独立的服务、独立的端口(默认 8788),这条推导
+        //    会稳定地指向一个不存在的端点,而且失败得很安静 —— 界面上只是
+        //    一直显示"未连接"。吃饭的地址由它自己的配置给。
         #if os(macOS)
-        return "ws://127.0.0.1:8787/v1/meals/ws"
+        return "ws://127.0.0.1:8788/v1/meals/ws"
         #else
         return ""
         #endif

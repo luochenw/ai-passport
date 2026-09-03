@@ -84,7 +84,7 @@
   任何路由。以前的 `makeActive` 会在设备按键时自动抢焦点:同事在 B 上按一
   下,你正看着的窗口会自己跳走。
 - **对讲身份必须每台一份。**服务端在同一房间里按 `clientId` 顶号
-  (`services/walkie-server/main.go:296-308`),两台共用一个会每两秒互踢一次。
+  (`services/walkie/main.go:296-308`),两台共用一个会每两秒互踢一次。
   `walkie.client-id.<设备UUID>` / `walkie.name.<设备UUID>` 按设备分;服务器
   地址、房间、钥匙串里的口令是**全局一份**(口令是房间口令,`main.go:286`
   只在 join 时比一次)。昵称默认派生自广播名,否则名单里两行一模一样。

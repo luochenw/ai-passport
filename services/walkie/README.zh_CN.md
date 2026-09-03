@@ -2,19 +2,15 @@
   <strong>简体中文</strong> · <a href="README.md">English</a>
 </p>
 
-# 本地伴侣服务
+# 对讲服务
 
 该服务负责房间成员管理、半双工占麦、实时音频转发，以及可选的 Apple Push to
 Talk 唤醒通知。所有状态只保存在内存中，服务不会录制音频。
 
-服务同时在仓库外保存每周菜单历史，并在工作日午餐、晚餐时段仅向已安装“吃饭”
-应用且在线的伴侣端广播提醒。macOS 默认菜单状态路径为
-`~/Library/Application Support/folotoy/meal-menu.json`。
-
 ## 运行
 
 ```bash
-cd services/walkie-server
+cd services/walkie
 go run . -listen 0.0.0.0:8787
 ```
 
@@ -26,20 +22,7 @@ macOS 上可安装为登录后自动运行的本地常驻服务：
 
 伴侣应用连接 `ws://<服务器地址>:8787/v1/ws`，健康检查地址为 `/healthz`。
 
-“吃饭”应用连接 `ws://<服务器地址>:8787/v1/meals/ws`。本机使用
-`POST /v1/meals/update` 写入一周菜单，`GET /v1/meals/current` 与
-`GET /v1/meals/weeks` 读取历史；本机可通过
-`POST /v1/meals/remind?meal=lunch|dinner` 手动触发一次饭点提醒。
-
-餐厅由部署时的 `MEAL_BUILDING` 环境变量决定（不设则不校验，菜单文件里写什么就是什么）。抓取一周菜单 JSON 后可执行：
-
-```bash
-python3 update-menu.py /path/to/week.json
-```
-
-同一周的不同日期会合并，最多保留 52 周历史。服务按 Asia/Shanghai 时区在工作日
-12:10、18:10 广播；只有在线且已安装“吃饭”的客户端接收 Passport 全局卡片，
-客户端收到周菜单后还会预排本地系统通知。
+吃饭是**另一个服务**，见 [`services/meal/`](../meal/README.zh_CN.md)。
 
 设置 `WALKIE_SHARED_TOKEN` 后，所有客户端必须提供相同的预共享口令。不要把
 真实口令写进仓库。

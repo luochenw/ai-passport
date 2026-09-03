@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -17,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/FoloToy/ai-passport/services/internal/wsx"
 	"github.com/coder/websocket"
 )
 
@@ -146,7 +148,7 @@ func (h *mealHub) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Close(websocket.StatusPolicyViolation, "meal join required")
 		return
 	}
-	clientID := cleanField(message.ClientID, 96)
+	clientID := wsx.CleanField(message.ClientID, 96)
 	if clientID == "" {
 		_ = conn.Close(websocket.StatusPolicyViolation, "clientId is required")
 		return
@@ -473,7 +475,7 @@ func (h *mealHub) installedClientsLocked() []*mealSubscriber {
 }
 
 func normalizeMealWeek(week *mealWeek, location *time.Location, now time.Time) error {
-	week.Building = cleanField(week.Building, 96)
+	week.Building = wsx.CleanField(week.Building, 96)
 	if want := mealBuildingName(); want != "" && week.Building != want {
 		return fmt.Errorf("building must be %s", want)
 	}
@@ -515,7 +517,7 @@ func normalizeMealWeek(week *mealWeek, location *time.Location, now time.Time) e
 	week.Days = normalized
 	// 来源标签由菜单文件自己带。以前这里有个写死的默认值,那是部署者
 	// 自己食堂的名字,不该出现在开源代码里。
-	week.Source = cleanField(week.Source, 96)
+	week.Source = wsx.CleanField(week.Source, 96)
 	week.Updated = now.In(location).Format(time.RFC3339)
 	return nil
 }
@@ -523,7 +525,7 @@ func normalizeMealWeek(week *mealWeek, location *time.Location, now time.Time) e
 func normalizeMealPeriod(period *mealPeriod, date, meal string) {
 	outlets := make([]mealOutlet, 0, len(period.Outlets))
 	for _, outlet := range period.Outlets {
-		outlet.Name = cleanField(outlet.Name, 96)
+		outlet.Name = wsx.CleanField(outlet.Name, 96)
 		outlet.Floor = normalizeFloor(outlet.Floor, outlet.Name)
 		if outlet.Floor == "" || strings.Contains(outlet.Name, "温馨提示") {
 			continue
@@ -604,7 +606,7 @@ func floorNumber(floor string) int {
 func cleanStrings(values []string, limit, maxRunes int) []string {
 	out := make([]string, 0, min(len(values), limit))
 	for _, value := range values {
-		value = cleanField(value, maxRunes)
+		value = wsx.CleanField(value, maxRunes)
 		if value == "" {
 			continue
 		}
@@ -731,4 +733,40 @@ func defaultMealStatePath() string {
 		return ""
 	}
 	return filepath.Join(dir, "folotoy", "meal-menu.json")
+}
+
+// 吃饭服务。抓取/保存每周菜单,推荐楼层,按点广播提醒。
+//
+// 以前它是对讲服务二进制里的几个 /v1/meals/* 路由。拆开的理由很实在:
+// 两件事没有任何共同状态,而挂在一起意味着改一次菜单解析要重启所有人的
+// 对讲。端口也分开 —— 伴侣端的吃饭配置里填的是这个服务的地址,跟对讲
+// 服务器地址互不相干。
+func main() {
+	listen := flag.String("listen", "0.0.0.0:8788", "HTTP listen address")
+	statePath := flag.String("state", defaultMealStatePath(), "path for weekly meal menus")
+	flag.Parse()
+
+	meals := newMealHub(*statePath)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	// 路径保持 /v1/meals/*(而不是趁机改成 /v1/*)—— 伴侣端
+	// MealClient.mealEndpoint 是按这个前缀拼的,改了要同时动两端,
+	// 而这次拆分本来不该有任何协议变化。
+	mux.HandleFunc("/v1/meals/ws", meals.handleWebSocket)
+	mux.HandleFunc("/v1/meals/current", meals.handleCurrent)
+	mux.HandleFunc("/v1/meals/weeks", meals.handleWeeks)
+	mux.HandleFunc("/v1/meals/update", meals.handleUpdate)
+	mux.HandleFunc("/v1/meals/remind", meals.handleRemind)
+
+	httpServer := &http.Server{
+		Addr:              *listen,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	log.Printf("meal server listening on %s", *listen)
+	log.Fatal(httpServer.ListenAndServe())
 }

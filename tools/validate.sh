@@ -35,9 +35,9 @@ run_static_checks() {
     "${test_dir}/test_walkie_codec"
 
     if command -v go >/dev/null 2>&1; then
-        (cd services/walkie-server && go test ./...)
+        (cd services && go test ./...)
     else
-        echo "跳过 walkie-server tests:本机没有 go"
+        echo "跳过 services 的 go test:本机没有 go"
     fi
 
     # 注:这里曾经有一个 dashboard_parse 的 JSON 解析回归测试。面板数据的获取

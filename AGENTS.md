@@ -95,7 +95,7 @@ type conforming to `RemoteApp`, not firmware.
   on any key press: a colleague pressing a button on device B yanked the window
   you were looking at.
 - **Walkie identity must be per device.** The server evicts a same-`clientId`
-  connection in the same room (`services/walkie-server/main.go:296-308`), so
+  connection in the same room (`services/walkie/main.go:296-308`), so
   two devices sharing one id kick each other every two seconds.
   `walkie.client-id.<deviceUUID>` / `walkie.name.<deviceUUID>` are per device;
   server address, room and the keychain token stay **global** (the token is a
