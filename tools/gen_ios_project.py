@@ -100,11 +100,16 @@ def main():
     #
     # 用 /bin/sh 写,不用 compgen(那是 bash 内建,Xcode 的脚本阶段默认 sh)。
     config_script = (
+        'rm -f \\"${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}/dashboard.json\\" '
+        '\\"${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}/meal.json\\"\\n'
         'for f in \\"$HOME\\"/.folotoy/*.json; do\\n'
         '  [ -e \\"$f\\" ] || continue\\n'
         '  cp \\"$f\\" \\"${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}/\\"\\n'
         '  echo \\"\\u5df2\\u6253\\u5305: $(basename \\"$f\\")\\"\\n'
-        'done'
+        'done\\n'
+        '/usr/bin/python3 \\"${SRCROOT}/../tools/configure_ios_dashboard_ats.py\\" '
+        '\\"${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}/Info.plist\\" '
+        '\\"${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}/dashboard.json\\"'
     )
 
     text = f'''// !$*UTF8*$!
@@ -179,7 +184,9 @@ def main():
 			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
 			files = ();
-			inputPaths = ();
+			inputPaths = (
+				"$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
+			);
 			name = "\u6253\u5305\u5e94\u7528\u914d\u7f6e";
 			outputPaths = ();
 			runOnlyForDeploymentPostprocessing = 0;

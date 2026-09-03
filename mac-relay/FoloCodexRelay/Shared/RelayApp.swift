@@ -19,7 +19,7 @@ struct RelayApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView(core: core)
+            RootView(core: core, router: core.router)
         }
         #if os(macOS)
         // macOS 上窗口是可以随便拉的,给个合适的初始尺寸。iOS 上窗口就是
@@ -31,6 +31,35 @@ struct RelayApp: App {
 
 struct RootView: View {
     let core: AppCore
+    /// ⚠ 必须是 `@ObservedObject`。每台设备有自己的一套模型,切设备就是换
+    /// 一整组 `ObservableObject` —— 只有 router 本身可观察,SwiftUI 才知道
+    /// 该重画。以前这里只有一个 `let core: AppCore`(不可观察),点设备条
+    /// 界面根本不会有反应。
+    @ObservedObject var router: SessionRouter
+
+    var body: some View {
+        VStack(spacing: 0) {
+            DevicesBar(model: core.devicesModel)
+            if let session = router.selected {
+                // ⚠ `.id(deviceID)`:切设备时让 SwiftUI 把整棵子树**重建**,
+                // 而不是把新模型塞进旧视图。后者会留下上一台的导航栈位置、
+                // 滚动位置和展开状态 —— 看起来像"B 设备记得 A 的操作"。
+                SessionView(session: session)
+                    .id(session.deviceID)
+            } else {
+                WaitingForDeviceView()
+            }
+        }
+        .padding(.top, 6)
+    }
+}
+
+/// 一台设备的三个页签。谈的全部是**这一台**。
+private struct SessionView: View {
+    let session: DeviceSession
+    /// 「应用」标签页的导航栈。每台各一份 —— 它是 `@State`,而外面套了
+    /// `.id(deviceID)`,换设备时整棵子树重建,栈自然跟着归零。
+    @State private var appSettingsPath = NavigationPath()
 
     var body: some View {
         // 三个一级页面放进一个标签窗口。应用自己的设置属于应用管理层级,
@@ -43,22 +72,49 @@ struct RootView: View {
         //            而且刷坏了要靠 bootloader 的防砖逻辑救回来。
         // 两者放在同一个标签下,用户点"安装"时根本不知道自己触发的是哪一种。
         TabView {
-            NavigationStack {
-                RemoteAppsView(model: core.remoteAppsModel)
+            // ⚠ path 由外面拿着,入口用显式 Button 往里 append。
+            //
+            // 原来是在 List 行里放 NavigationLink(value:) + .buttonStyle(.plain)。
+            // macOS 上那样点不动:List 行本身有选中逻辑,同一行里又有图标
+            // 下拉的 Menu,三者抢同一次点击,plain 样式的 NavigationLink 经常
+            // 一次都收不到。改成受控 path 之后,点击目标只有齿轮那一个按钮,
+            // 谁响应是确定的。
+            NavigationStack(path: $appSettingsPath) {
+                RemoteAppsView(model: session.remoteAppsModel,
+                               onOpenSettings: { appSettingsPath.append($0) })
                     .navigationDestination(for: RemoteAppSettingsRoute.self) { route in
                         switch route {
                         case .walkieTalkie:
-                            WalkieTalkieView(model: core.walkieApp)
+                            WalkieTalkieView(model: session.walkieApp)
                                 .navigationTitle("对讲机设置")
+                        case .meal:
+                            MealSettingsView(model: session.mealApp)
+                                .navigationTitle("吃饭设置")
                         }
                     }
             }
             .tabItem { Label("应用", systemImage: "square.grid.2x2") }
-            DeviceConfigView(model: core.deviceConfigModel)
+            DeviceConfigView(model: session.deviceConfigModel)
                 .tabItem { Label("配置", systemImage: "gearshape") }
-            AppStoreView(model: core.appStoreModel)
+            AppStoreView(model: session.appStoreModel)
                 .tabItem { Label("固件", systemImage: "arrow.down.circle") }
         }
-        .padding(.top, 6)
+    }
+}
+
+/// 一台都还没连上。说清楚在等什么,不要给一个空白的标签窗口。
+private struct WaitingForDeviceView: View {
+    var body: some View {
+        VStack(spacing: 10) {
+            ProgressView()
+            Text("正在寻找 \(BLERelay.namePrefix) 设备…")
+                .font(.callout)
+            Text("每台连上的设备都会有自己独立的一套应用和对讲身份。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

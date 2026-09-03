@@ -2,11 +2,16 @@
   <a href="README.zh_CN.md">简体中文</a> · <strong>English</strong>
 </p>
 
-# Local Walkie-Talkie Server
+# Local Companion Service
 
 This service provides room membership, half-duplex floor control, realtime
 audio forwarding, and optional Apple Push to Talk wake notifications. It keeps
 all state in memory and never records audio.
+
+It also stores weekly meal menus outside the repository and broadcasts weekday
+lunch and dinner reminders to connected companion clients that have installed
+the meal application. Menu history defaults to
+`~/Library/Application Support/folotoy/meal-menu.json` on macOS.
 
 ## Run
 
@@ -15,8 +20,31 @@ cd services/walkie-server
 go run . -listen 0.0.0.0:8787
 ```
 
+On macOS, install the persistent local service with:
+
+```bash
+./install-macos.sh
+```
+
 The companion app connects to `ws://<server-address>:8787/v1/ws`. Health checks
 are available at `/healthz`.
+
+Meal clients use `ws://<server-address>:8787/v1/meals/ws`. Local menu ingestion
+uses `POST /v1/meals/update`; `GET /v1/meals/current` and
+`GET /v1/meals/weeks` expose the stored menu history. Local manual reminder
+checks use `POST /v1/meals/remind?meal=lunch|dinner`.
+
+The configured restaurant is Beijing Vanke Fashion Center
+(`MDBD00000590`). Submit a captured weekly JSON file with:
+
+```bash
+python3 update-menu.py /path/to/week.json
+```
+
+The service merges days into the same week, keeps up to 52 weeks of history,
+and sends weekday reminders at 12:10 and 18:10 Asia/Shanghai time. Only online
+clients that report the meal application as installed receive the realtime
+global card; clients also schedule local notifications after receiving a week.
 
 Set `WALKIE_SHARED_TOKEN` to require the same pre-shared token from every
 client. Do not place the token in this repository.

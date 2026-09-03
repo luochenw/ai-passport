@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 // =====================================================================
 // 服务器面板 —— 第一个远程应用。
@@ -51,7 +52,12 @@ final class DashboardApp: RemoteApp {
     // 配置放在用户主目录下的一个文件里,不在仓库中,所以口令不可能被提交:
     //
     //   ~/.folotoy/dashboard.json
-    //   { "url": "https://…/api/status", "username": "…", "password": "…" }
+    //   {
+    //     "url": "https://…/api/status",
+    //     "username": "…",
+    //     "password": "…",
+    //     "certificateSHA256": "服务器叶子证书的 SHA-256"
+    //   }
     //
     // 每次用到时重新读:改完文件立刻生效,不用重启这个 app。文件本身很小,
     // 而请求本来就是十几秒一次,这点读取开销无关紧要。
@@ -59,6 +65,7 @@ final class DashboardApp: RemoteApp {
         let url: String
         let username: String?
         let password: String?
+        let certificateSHA256: String?
     }
 
     /// 这个应用的接口地址和账号口令是**固定的**,不是给用户调的参数 ——
@@ -225,16 +232,26 @@ final class DashboardApp: RemoteApp {
             }
         }
 
-        // 私有服务通常是自签名证书 + IP 直连,系统的证书校验必然过不去。
-        // 由 InsecureTLSDelegate 放行 —— 取舍和风险见那个类的注释。
+        // 私有服务是自签名证书 + IP 直连,系统证书校验必然过不去。iOS 的
+        // Info.plist 允许请求进入 challenge 回调后,这里再把例外严格限制到
+        // dashboard.json 配置的这个主机,避免同一进程里的其他 HTTPS 请求
+        // 也被无条件信任。
+        let trustDelegate = DashboardServerTrustDelegate(
+            allowedHost: url.host,
+            certificateSHA256: cfg.certificateSHA256
+        )
         let session = URLSession(configuration: .ephemeral,
-                                 delegate: InsecureTLSDelegate.shared,
+                                 delegate: trustDelegate,
                                  delegateQueue: nil)
         session.dataTask(with: req) { [weak self] body, response, error in
+            session.finishTasksAndInvalidate()
             guard let self = self else { return }
             self.queue.async {
                 if let error = error {
-                    self.status = "请求失败:\(error.localizedDescription)"
+                    let nsError = error as NSError
+                    self.status = Self.requestFailureText(nsError)
+                    log("[dashboard] 请求失败 code=\(nsError.code) " +
+                        "host=\(url.host ?? "-"): \(nsError.localizedDescription)")
                     self.requestPush?()
                     return
                 }
@@ -246,39 +263,117 @@ final class DashboardApp: RemoteApp {
                 guard let body = body,
                       let parsed = DashboardData(json: body) else {
                     self.status = "返回的不是预期的 JSON"
+                    log("[dashboard] 返回内容不是预期 JSON host=\(url.host ?? "-")")
                     self.requestPush?()
                     return
                 }
                 self.data = parsed
                 self.status = ""
+                log("[dashboard] 获取成功 host=\(url.host ?? "-") bytes=\(body.count)")
                 self.requestPush?()
             }
         }.resume()
     }
+
+    private static func requestFailureText(_ error: NSError) -> String {
+        guard error.domain == NSURLErrorDomain else {
+            return "请求失败:\(error.localizedDescription)"
+        }
+        switch error.code {
+        case NSURLErrorAppTransportSecurityRequiresSecureConnection:
+            return "iOS 网络策略阻止请求(-1022)"
+        case NSURLErrorSecureConnectionFailed,
+             NSURLErrorServerCertificateHasBadDate,
+             NSURLErrorServerCertificateUntrusted,
+             NSURLErrorServerCertificateHasUnknownRoot,
+             NSURLErrorServerCertificateNotYetValid:
+            return "服务器证书校验失败(\(error.code))"
+        case NSURLErrorTimedOut:
+            return "连接服务器超时(-1001)"
+        case NSURLErrorCannotConnectToHost:
+            return "无法连接服务器(-1004)"
+        default:
+            return "请求失败(\(error.code)):\(error.localizedDescription)"
+        }
+    }
 }
 
-/// 放行自签名证书。
+/// 仅信任 dashboard.json 指定主机上的固定自签名证书。
 ///
-/// ⚠ 这条连接因此挡不住中间人:能劫持它的人可以看到 Basic 认证的口令,也能
-/// 伪造面板数据。之所以接受:目标是自家内网、用 IP 直连的私有服务,公共 CA
-/// 不可能给它签发证书,校验必然失败,功能就没法用;而这些数据是只读展示,
-/// 设备不会因为它们做任何有副作用的事。
-///
-/// 如果要拿它访问公网上的重要服务,应该改成固定那张自签名证书(把它的
-/// SHA-256 存下来逐次比对),而不是继续无条件放行。
-final class InsecureTLSDelegate: NSObject, URLSessionDelegate {
-    static let shared = InsecureTLSDelegate()
+/// 目标服务用 IP 直连且证书没有 IP SAN，系统主机名校验必然失败。这里同时
+/// 校验配置主机和叶子证书 SHA-256，再把该证书设为本次连接的唯一信任锚。
+/// 地址或证书任意一项变化都会失败，不会把例外扩散到其他网络请求。
+final class DashboardServerTrustDelegate: NSObject, URLSessionTaskDelegate {
+    private let allowedHost: String?
+    private let certificateSHA256: String?
+
+    init(allowedHost: String?, certificateSHA256: String?) {
+        self.allowedHost = allowedHost?.lowercased()
+        self.certificateSHA256 = Self.normalizedFingerprint(certificateSHA256)
+    }
 
     func urlSession(_ session: URLSession,
                     didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition,
                                                   URLCredential?) -> Void) {
-        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-              let trust = challenge.protectionSpace.serverTrust else {
+        handle(challenge, completionHandler: completionHandler)
+    }
+
+    func urlSession(_ session: URLSession,
+                    task: URLSessionTask,
+                    didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition,
+                                                  URLCredential?) -> Void) {
+        handle(challenge, completionHandler: completionHandler)
+    }
+
+    private func handle(
+        _ challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        let host = challenge.protectionSpace.host.lowercased()
+        let method = challenge.protectionSpace.authenticationMethod
+        log("[dashboard] 认证挑战 method=\(method) host=\(host)")
+        guard method == NSURLAuthenticationMethodServerTrust,
+              host == allowedHost,
+              let trust = challenge.protectionSpace.serverTrust,
+              let expectedFingerprint = certificateSHA256,
+              let certificates = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
+              let certificate = certificates.first else {
             completionHandler(.performDefaultHandling, nil)
             return
         }
+
+        let certificateData = SecCertificateCopyData(certificate) as Data
+        let actualFingerprint = RemoteAppCatalog.sha256Hex(certificateData)
+        guard actualFingerprint == expectedFingerprint else {
+            log("[dashboard] 证书指纹不匹配 host=\(host)")
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+
+        // 证书没有 IP SAN，不能使用默认 SSL hostname policy。指纹已经确认
+        // 叶子证书就是配置允许的那一张，再将它设为本次连接唯一信任锚，
+        // 用 Basic X.509 校验证书结构和有效期。
+        SecTrustSetPolicies(trust, SecPolicyCreateBasicX509())
+        SecTrustSetAnchorCertificates(trust, [certificate] as CFArray)
+        SecTrustSetAnchorCertificatesOnly(trust, true)
+        var trustError: CFError?
+        guard SecTrustEvaluateWithError(trust, &trustError) else {
+            log("[dashboard] 固定证书校验失败 host=\(host): " +
+                ((trustError as Error?)?.localizedDescription ?? "unknown"))
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+
+        log("[dashboard] 固定证书校验通过 host=\(host)")
         completionHandler(.useCredential, URLCredential(trust: trust))
+    }
+
+    static func normalizedFingerprint(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let normalized = value.lowercased().filter { $0.isHexDigit }
+        return normalized.count == 64 ? normalized : nil
     }
 }
 

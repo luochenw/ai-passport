@@ -25,7 +25,7 @@ swiftc $SOURCES \
     -o "$APP/Contents/MacOS/FoloCodexRelay" \
     -framework CoreBluetooth -framework Foundation \
     -framework Speech -framework AVFoundation \
-    -framework SwiftUI
+    -framework SwiftUI -framework UserNotifications
 
 # 应用商店的本地目录(v1:静态文件,不接后端),跟着 app 一起分发。放在
 # Contents/Resources 下(不是 MacOS 下)—— codesign 会把 Contents/MacOS 里

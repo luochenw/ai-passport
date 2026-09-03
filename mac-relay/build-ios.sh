@@ -42,7 +42,7 @@ swiftc $SOURCES \
     -sdk "$SDK" \
     -framework CoreBluetooth -framework Foundation \
     -framework Speech -framework AVFoundation \
-    -framework SwiftUI -framework PushToTalk
+    -framework SwiftUI -framework PushToTalk -framework UserNotifications
 
 mkdir -p "$APP/AppCatalog"
 cp -R AppCatalog/. "$APP/AppCatalog/" 2>/dev/null || true
@@ -61,6 +61,8 @@ if compgen -G "$HOME/.folotoy/*.json" > /dev/null; then
 else
     echo "注意: ~/.folotoy/ 下没有 .json,需要配置的应用会显示「未配置」"
 fi
+python3 ../tools/configure_ios_dashboard_ats.py \
+    "$APP/Info.plist" "$APP/dashboard.json"
 
 if [[ "$MODE" == "--device" ]]; then
     # ⚠ 这条分支只产出**没签名**的 .app,装不进真机。

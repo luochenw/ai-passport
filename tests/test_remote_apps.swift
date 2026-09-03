@@ -170,13 +170,16 @@ struct TestRemoteApps {
             let h = makeHost("settings-route", c)
             h.register(FakeApp("面板"))
             h.register(FakeApp("对讲机", settingsRoute: .walkieTalkie))
+            h.register(FakeApp("吃饭", settingsRoute: .meal))
             h.waitForPendingWork()
 
             let panel = c.lists.last?.first { $0.name == "面板" }
             let walkie = c.lists.last?.first { $0.name == "对讲机" }
+            let meal = c.lists.last?.first { $0.name == "吃饭" }
             checkEqual(panel?.settingsRoute, nil, "普通应用不显示设置入口")
             checkEqual(walkie?.settingsRoute, .walkieTalkie,
                        "对讲机列表项携带设置路由")
+            checkEqual(meal?.settingsRoute, .meal, "吃饭列表项携带设置路由")
         }
 
         print("== 3. 首屏按下标打开的是已安装的那个 ==")

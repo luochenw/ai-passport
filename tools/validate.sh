@@ -83,6 +83,12 @@ run_static_checks() {
             mac-relay/FoloCodexRelay/Shared/WalkieClient.swift \
             mac-relay/FoloCodexRelay/Shared/WalkieProtocol.swift
         HOME="${test_dir}" "${test_dir}/test_walkie_client"
+
+        swiftc -o "${test_dir}/test_meal_client" \
+            tests/test_meal_client.swift \
+            mac-relay/FoloCodexRelay/Shared/MealClient.swift \
+            mac-relay/FoloCodexRelay/Shared/MealProtocol.swift
+        HOME="${test_dir}" "${test_dir}/test_meal_client"
     else
         echo "跳过 test_remote_apps:本机没有 swiftc"
     fi

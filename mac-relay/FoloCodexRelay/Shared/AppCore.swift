@@ -8,10 +8,10 @@ import Foundation
 // 只要接线还留在 main.swift 里,这个 app 就没法变成 SwiftUI 的
 // `@main App`,也就没法在 iOS 上启动。所以搬进一个显式单例。
 //
-// 这里是整个工程**唯一**一处 `#if os(macOS)`。这不是巧合,是设计:
-// 能共享到哪一层由操作系统能力决定,而这个 app 里只有一件事是 iOS 真的
-// 做不到的 —— 起子进程跑 `codex exec` 并读 ~/.codex/sessions。BLE、语音
-// 识别、ADPCM、全部应用逻辑、全部界面都是三端通用的。
+// ⚠ 这一层**只做分发**。所有跟"某一台设备"有关的状态都在 DeviceSession
+// 里,每台一份。留在这里的只有三类:一条 BLE 无线电(CBCentralManager 的
+// restore identifier 必须全进程唯一)、设备名册和"界面在看哪一台",以及
+// 系统里天生只有一份的资源(iOS 系统 PTT、本地通知调度、吃饭服务的连接)。
 // =====================================================================
 
 /// 进程级的接线。`shared` 第一次被取用时完成全部构造与启动,只跑一次。
@@ -19,228 +19,140 @@ final class AppCore {
     static let shared = AppCore()
 
     let relay: BLERelay
-    let remoteHost: RemoteAppHost
-    let remoteAppsModel: RemoteAppsModel
-    let appStoreModel: AppStoreModel
-    let deviceConfigModel: DeviceConfigModel
-    let walkieApp: WalkieTalkieApp
-    private let walkieClient: WalkieClient
-    private let voicePipeline: VoiceInputPipeline
+    let devicesModel = DevicesModel()
+    /// 界面正在看哪一台,以及每台自己的那一套模型。
+    let router = SessionRouter()
 
-    #if os(macOS)
-    /// Codex 的浏览后端。要 fork/exec 跑 `codex exec`、要读
-    /// ~/.codex/sessions —— iOS 内核禁止前者,沙盒里没有后者。
-    private let codexBrowser: CodexBrowserModel
-    #endif
+    /// 吃饭是纯读 + 本地提醒:服务端不按 client 解复用,提醒也是弹给
+    /// **一个人**看的,不该因为他手里有三台设备就收三条。全局一份。
+    private let mealClient: MealClient
+    /// 饭点提醒:UNUserNotificationCenter 是进程唯一的,通知标识符也没有设备
+    /// 区分。每台各起一个调度器的话,后一个 update 会把前一个排好的全删掉。
+    private let mealNotifications = MealNotificationScheduler()
+    private let sharedServices: SharedServices
+
     #if os(iOS)
+    /// 系统级 PTT 是真正的独占资源:PTChannelManager 一个 app 只有一个
+    /// activeChannelUUID,AVAudioSession 是进程级的。给第二个会话再 join
+    /// 会把第一个挤掉,而且会连带撤销它在服务器上的推送注册 —— 切一次设备
+    /// 就把另一台永久弄哑,还没有任何提示。所以它归**一个**会话所有。
     private let systemPushToTalk: SystemPushToTalk
+    private var pttOwnerID: UUID?
     #endif
 
     private init() {
         log("========================================")
-        log("FoloCodexRelay 启动中 (协议 v2: 工作区/会话/分页浏览器)...")
+        log("FoloCodexRelay 启动中 (每台设备一个独立会话)...")
 
         relay = BLERelay()
-        walkieClient = WalkieClient()
-        walkieApp = WalkieTalkieApp(client: walkieClient)
-        #if os(iOS)
-        systemPushToTalk = SystemPushToTalk(room: walkieApp.room)
-        #endif
-
-        // CodexBrowserModel 的输出**不再**走旧的 Codex GATT 通道。
-        //
-        // 那条通道对应的设备端界面(demo_codex.c 的阅读/列表页)在架构转向
-        // 之后已经没有任何入口能进去了 —— 继续往那边推,是把数据发给一个
-        // 不会显示它的地方。现在改由 CodexApp 接住,渲染成远程界面。旧
-        // service 只保留 AUDIO 那一条:语音是设备 → 这边的流,那个方向依然
-        // 活着而且不可替代。
-        var codexAppSink: ((UInt8, UInt16, UInt16, String) -> Void)?
-
-        voicePipeline = VoiceInputPipeline()
-
-        #if os(macOS)
-        let browser = CodexBrowserModel(sender: { kind, index, total, text in
-            codexAppSink?(kind, index, total, text)
-        })
-        codexBrowser = browser
-        voicePipeline.sessionContextProvider = { completion in
-            browser.currentSessionContext(completion: completion)
-        }
-        voicePipeline.onSendFailure = { reason in
-            browser.reportVoiceError(reason)
-        }
-        // 转写好的文字往哪儿送 —— macOS 独有的那一步。VoiceInputPipeline
-        // 本身不认识 HeadlessCodexSender(它要 fork/exec),由入口注入。
-        let pipeline = voicePipeline
-        voicePipeline.onTranscript = { text, threadId, model in
-            HeadlessCodexSender.send(threadId: threadId, model: model, text: text,
-                                     onFailure: pipeline.onSendFailure)
-        }
-        #endif
-
-        relay.onAudioChunk = { [voicePipeline] flags, payload in
-            voicePipeline.handleChunk(flags: flags, payload: payload)
-        }
-        relay.onWalkieAudioFrame = { [walkieClient] frame in
-            walkieClient.handleDeviceAudio(frame)
-        }
-        relay.onWalkieStatus = { [walkieClient] event, code in
-            walkieClient.handleDeviceStatus(event, code: code)
-        }
-        relay.onWalkieLinkChange = { [walkieClient] connected in
-            walkieClient.setDeviceConnected(connected)
-        }
-        walkieClient.sendDeviceControl = { [relay] operation, stream in
-            relay.sendWalkieControl(operation: operation, stream: stream)
-        }
-        walkieClient.sendDeviceAudio = { [relay] frame in
-            relay.sendWalkieAudio(frame)
-        }
+        mealClient = MealClient()
+        sharedServices = SharedServices(relay: relay, mealClient: mealClient,
+                                        mealNotifications: mealNotifications)
 
         #if os(iOS)
-        walkieClient.systemPTTAvailable = { [systemPushToTalk] in systemPushToTalk.isReady }
-        walkieClient.requestSystemTransmit = { [systemPushToTalk] in
-            systemPushToTalk.beginTransmitting()
-        }
-        walkieClient.stopSystemTransmit = { [systemPushToTalk] in
-            systemPushToTalk.stopTransmitting()
-        }
-        walkieClient.onRemoteSpeakerChanged = { [systemPushToTalk] speaker in
-            systemPushToTalk.setRemoteSpeaker(speaker)
-        }
-        systemPushToTalk.onPushToken = { [walkieClient] token in
-            walkieClient.setPushToken(token)
-        }
-        systemPushToTalk.onIncomingSpeaker = { [walkieClient] speaker in
-            walkieClient.wakeForIncoming(speaker: speaker)
-        }
-        systemPushToTalk.onBeginTransmitting = { [walkieClient] systemInitiated in
-            walkieClient.systemDidBeginTransmitting(systemInitiated: systemInitiated)
-        }
-        systemPushToTalk.onEndTransmitting = { [walkieClient] in
-            walkieClient.systemDidEndTransmitting()
-        }
-        systemPushToTalk.onAudioSessionChanged = { [walkieClient] active in
-            walkieClient.systemAudioSessionChanged(active: active)
-        }
-        systemPushToTalk.onTransmitFailure = { [walkieClient] message in
-            walkieClient.systemTransmitFailed(message)
-        }
-        walkieApp.installationChanged = { [systemPushToTalk] installed, room in
-            systemPushToTalk.setEnabled(installed, room: room)
-        }
-        walkieApp.roomChanged = { [systemPushToTalk] room in
-            systemPushToTalk.updateRoom(room)
-        }
-        systemPushToTalk.start(restoringEnabled: walkieClient.currentSnapshot().installed)
+        // 房间名由持有它的那个会话接管;这里先用默认值把频道立起来。
+        systemPushToTalk = SystemPushToTalk(room: "local")
         #endif
 
-        appStoreModel = AppStoreModel(
-            sender: { [relay] kind, index, total, payload in
-                relay.enqueueAppStore(kind: kind, index: index, total: total, payload: payload)
-            },
-            maxPayloadSize: { [relay] in
-                relay.appStoreMaxPayloadSize()
-            },
-            cancelTransfer: { [relay] in
-                relay.cancelAppStoreTransfer()
-            },
-            sendBatch: { [relay] chunks, completion in
-                relay.sendAppStoreBatch(withoutResponse: chunks, completion: completion)
-            }
-        )
-        relay.onAppStoreCmdRequest = { [appStoreModel] req, a, b in
-            appStoreModel.handleRequest(req: req, a: a, b: b)
-        }
-
-        // 远程应用:设备是显示终端,这里是全部应用逻辑。加一个应用 =
-        // register 一行,设备侧不用改任何东西、也不用重刷固件。
-        remoteHost = RemoteAppHost(
-            send: { [relay] text in relay.sendRemoteScreen(text) },
-            sendManifest: { [relay] text in relay.sendRemoteManifest(text) },
-            // 通知走 cmd.notify —— 现成的非持久化命令通道(device_config.c:139
-            // 把 cmd.* 前缀转给 main.c 的 on_config_cmd,不落盘、也不要求
-            // NVS 打开)。不为通知新开特征值,也不动屏幕协议:屏幕协议表达的是
-            // "前台应用长什么样",而通知恰恰要在别的应用占着前台时也能到达。
-            sendNotify: { [relay] text in
-                relay.sendDeviceConfig([("cmd.notify", text)]) { ok in
-                    if !ok { log("[notify] 下发失败") }
-                }
-            }
-        )
-        // ⚠ 观察者必须在 register() **之前**装好。register() 的函数体跑在
-        // host 的串行队列上并会发布一次列表,晚装的话那几次发布全部丢给
-        // nil —— 而列表只在 register / 装卸时发布,错过就再没有第二次机会,
-        // 「应用」标签页会永远显示"还没有可用的应用"。setListObserver 内部
-        // 也会补发一次当前状态。
-        remoteAppsModel = RemoteAppsModel(host: remoteHost)
-
-        remoteHost.register(DashboardApp())
-        remoteHost.register(walkieApp)
-
-        // Codex:macOS 上接真后端,别的平台注入 nil。
+        // ---- 设备上下线:建 / 拆会话 ----
         //
-        // 注入 nil 不等于"这个应用消失了" —— 它照常出现在列表和设备首屏,
-        // 点进去会看到一屏说明。这是刻意的:用户在 Mac 上见过 Codex,到
-        // iPhone 上它凭空消失只会被当成 bug,而点进去一片空白更糟。
-        #if os(macOS)
-        let codexApp = CodexApp(browser: codexBrowser)
-        #else
-        let codexApp = CodexApp(
-            browser: nil,
-            unavailableReason: "Codex 需要在 Mac 上运行:它要启动 codex 命令行进程并读取本机的会话记录,iOS 两者都做不到。"
-        )
-        #endif
-        codexAppSink = { [weak codexApp] kind, index, total, text in
-            codexApp?.handleOutput(kind: kind, index: index, total: total, text: text)
+        // ⚠ 用这两条专门的事件,不要去 diff onDevicesChanged 的列表:
+        // 那个发布是限流的(publishDevices 有 1 秒节流),diff 会漏。
+        relay.onDeviceAttached = { [weak self] id in
+            DispatchQueue.main.async { self?.attach(id) }
         }
-        remoteHost.register(codexApp)
-
-        relay.onRemoteEvent = { [remoteHost] evt, a, b in
-            switch evt {
-            case 0: remoteHost.handleKey(a, b)          // 按键
-            case 1: remoteHost.setDeviceActive(a == 1)  // 进/出远程界面
-            case 2: remoteHost.deviceReady(active: a == 1, appIndex: b)
-            case 3: remoteHost.openApp(a)               // 首屏选中第 a 项(0xFE = 应用商店)
-            default: break
-            }
+        relay.onDeviceDetached = { [weak self] id in
+            DispatchQueue.main.async { self?.detach(id) }
         }
 
-        deviceConfigModel = DeviceConfigModel(
-            sender: { [relay] pairs, completion in relay.sendDeviceConfig(pairs, completion: completion) },
-            bleDisconnect: { [relay] in relay.disconnectDevice() },
-            bleRescan: { [relay] in relay.rescanDevice() }
-        )
-        // 连接状态和设备上报的状态都从 BLE 队列过来,而 @Published 只能在
-        // 主线程改 —— SwiftUI 在别的线程收到变更会直接报运行时警告,严重时
-        // 刷出错乱的界面。
-        // ⚠ 三个页签都要接同一个连接状态,漏一个就会出现"同一秒里三页说三种话"。
-        // 之前只有「配置」页接了,「应用」页照常显示"已安装"、「固件」页
-        // 一直显示"等待设备连接" —— 而它们说的是同一件事。
-        relay.onLinkChange = { [deviceConfigModel, remoteAppsModel, appStoreModel, remoteHost] connected, name in
+        // ---- 事件分发:每一条都已经带着设备标识 ----
+        //
+        // 以前这些回调没有设备参数,上层无从知道是哪台发来的,只能靠 relay
+        // 里一个"活跃设备"过滤 —— 而那个过滤正是第二台设备的事件全被吃掉
+        // 的原因。
+        relay.onRemoteEvent = { [weak self] id, evt, a, b in
+            DispatchQueue.main.async { self?.session(id)?.handleRemoteEvent(evt, a, b) }
+        }
+        relay.onAudioChunk = { [weak self] id, flags, payload in
             DispatchQueue.main.async {
-                deviceConfigModel.applyLinkChange(connected: connected, name: name)
-                // 「应用」页:没连上时不该显示任何设备状态,因为那份"已安装"
-                // 只是本机的记录,问不到设备就无法证实。
-                remoteAppsModel.isConnected = connected
-                // 「固件」页:没连上时不该让人点安装。
-                appStoreModel.isConnected = connected
-                // 通知在没连设备时直接丢弃(不排队),host 需要知道当前连没连。
-                remoteHost.setDeviceLinked(connected)
+                self?.session(id)?.handleAudioChunk(flags: flags, payload: payload)
             }
         }
-        relay.onDeviceStatus = { [deviceConfigModel] pairs in
+        relay.onWalkieAudioFrame = { [weak self] id, frame in
+            DispatchQueue.main.async { self?.session(id)?.handleWalkieAudio(frame) }
+        }
+        relay.onWalkieStatus = { [weak self] id, event, code in
+            DispatchQueue.main.async { self?.session(id)?.handleWalkieStatus(event, code: code) }
+        }
+        relay.onWalkieLinkChange = { [weak self] id, connected in
+            DispatchQueue.main.async { self?.session(id)?.setWalkieLinked(connected) }
+        }
+        relay.onAppStoreCmdRequest = { [weak self] id, req, a, b in
+            DispatchQueue.main.async { self?.session(id)?.handleAppStoreRequest(req: req, a: a, b: b) }
+        }
+        relay.onDeviceStatus = { [weak self] id, pairs in
+            DispatchQueue.main.async { self?.session(id)?.handleDeviceStatus(pairs) }
+        }
+        relay.onLinkChange = { [weak self] id, connected, _ in
             DispatchQueue.main.async {
-                deviceConfigModel.applyDeviceStatus(pairs)
+                guard let session = self?.router.sessions[id] else { return }
+                if connected { session.reattach() } else { session.detach() }
             }
+        }
+
+        // ---- 设备名册 ----
+        devicesModel.onSelect = { [weak self] id in
+            guard let self else { return }
+            self.router.selectedID = id
+            self.relay.showDevice(id)
+        }
+        relay.onDevicesChanged = { [devicesModel] list in
+            DispatchQueue.main.async { devicesModel.devices = list }
         }
 
         relay.start()
-        #if os(macOS)
-        codexBrowser.start()
-        voicePipeline.start()
-        #endif
 
-        log("FoloCodexRelay 已启动: 等待 \(BLERelay.targetName) 连接及 CMD 请求 (workspace/session/page 浏览协议 v2 + 语音输入 + 应用商店)")
+        log("FoloCodexRelay 已启动:等待 \(BLERelay.namePrefix)* 连接(可同时连多台,每台一个独立会话)")
+    }
+
+    /// **主线程调用。**
+    private func session(_ id: UUID) -> DeviceSession? {
+        router.sessions[id]
+    }
+
+    private func attach(_ id: UUID) {
+        if let existing = router.sessions[id] {
+            // 掉线重连:会话留着,浏览位置和身份都还在,不用从首屏重来。
+            existing.reattach()
+            return
+        }
+        let name = devicesModel.devices.first { $0.id == id }?.name ?? BLERelay.namePrefix
+        // 调试通道(/tmp/folo_remote_sim)只给第一个会话 —— 它是自递归轮询
+        // 且没有取消路径,每台各开一条会攒出一堆定时器抢同一个文件。
+        let session = DeviceSession(deviceID: id, deviceName: name, shared: sharedServices,
+                                    enableDebugChannel: router.sessions.isEmpty)
+        router.put(session)
+        if relay.displayedID == nil { relay.displayedID = id }
+        log("[session] 为 \(name) 建立独立会话(共 \(router.sessions.count) 个)")
+
+        #if os(iOS)
+        // 系统 PTT 归第一个建立的会话。跟着界面选中跑的话,每切一次设备就
+        // leave/join 一次频道:系统横幅闪、锁屏发话按钮短暂消失、推送 token
+        // 被注销再注册 —— 而 PTT 的全部价值就在锁屏后台唤醒的稳定性上,
+        // 不能跟着"用户在看哪一页"跑。
+        if pttOwnerID == nil {
+            pttOwnerID = id
+            session.bindSystemPushToTalk(systemPushToTalk)
+            log("[ptt] 系统级对讲归 \(name);其它设备在 app 退到后台后收不到来话")
+        }
+        #endif
+    }
+
+    private func detach(_ id: UUID) {
+        let name = router.sessions[id]?.deviceName ?? "设备"
+        router.sessions[id]?.detach()
+        // 会话对象**不删** —— BLE 掉线在这个项目里是常态(有自动重连和
+        // 看门狗),删掉的话每次重连都从首屏重来,而且对讲身份也会重置。
+        log("[session] \(name) 链路断开,会话保留等待重连")
     }
 }

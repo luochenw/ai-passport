@@ -119,13 +119,19 @@ final class AppStoreModel: ObservableObject {
     init(sender: @escaping (UInt8, UInt16, UInt16, Data) -> Void,
          maxPayloadSize: @escaping () -> Int,
          cancelTransfer: @escaping () -> Void,
-         sendBatch: @escaping (_ chunks: [Data], _ completion: @escaping () -> Void) -> Void) {
+         sendBatch: @escaping (_ chunks: [Data], _ completion: @escaping () -> Void) -> Void,
+         enableDebugChannel: Bool = true) {
         self.sender = sender
         self.maxPayloadSize = maxPayloadSize
         self.cancelTransfer = cancelTransfer
         self.sendBatch = sendBatch
         loadCatalog()
-        pollDebugTrigger()
+        // ⚠ 只给一个会话开。这是个 1 秒自递归、没有取消路径的文件轮询,
+        // 每台设备各开一条的话:桌上三台 = 三条轮询抢同一个
+        // /tmp/appstore_debug_install,谁先到谁赢 —— 三分之二的概率赢家不是
+        // 界面上选中的那台,于是某台设备闷头收完固件自己重启,而 Mac 上
+        // 一个进度条都没有(界面只渲染选中会话的那一页)。
+        if enableDebugChannel { pollDebugTrigger() }
     }
 
     /// Debug-only: lets a human (or Claude, driving this Mac's shell) kick off an install
