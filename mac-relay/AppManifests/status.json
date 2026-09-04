@@ -1,0 +1,53 @@
+{
+  "id": "status",
+  "name": "服务状态",
+  "detail": "定时拉一个 JSON 显示出来",
+  "icon": "",
+  "capability": "http",
+  "settings": null,
+  "keys": {
+    "ok": {
+      "click": "refresh"
+    }
+  },
+  "screens": [
+    {
+      "title": "服务状态",
+      "footer": "{{connected|pick:确定刷新/确定重试}}",
+      "rows": [
+        {
+          "when": {
+            "cond": "!connected",
+            "then": [
+              {
+                "text": "{{status}}"
+              }
+            ],
+            "else": [
+              {
+                "text": "{{data.name|default:服务}}"
+              },
+              {
+                "text": "状态  {{data.status|default:-}}"
+              },
+              {
+                "spacer": true
+              },
+              {
+                "each": {
+                  "path": "data.items",
+                  "limit": 5,
+                  "body": [
+                    {
+                      "text": "{{item.label|default:-}}  {{item.value|default:-}}"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

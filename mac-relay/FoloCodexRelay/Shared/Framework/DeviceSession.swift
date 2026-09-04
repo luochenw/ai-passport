@@ -171,36 +171,66 @@ final class DeviceSession {
         // 应用实例每会话各 new 一份。RemoteApp 的 requestPush / notify 都是
         // 单槽赋值,一份实例结构上就服务不了两个 host —— 共用的话第二个
         // host 的注入会静默覆盖第一个,第一台的那个应用从此推不出任何东西。
-        // 清单读不到就跳过这个应用 —— 注册一个画不出东西的空壳,比首屏
-        // 少一个图标更难查。
-        if let manifest = ManifestStore.load(WalkieCapability.id) {
-            let app = ManifestApp(manifest: manifest, capability: walkieCapability)
-            // 后台来话的通知走 cmd.notify,跟屏幕是两条路 —— 能力自己发不了,
-            // 得由解释器把 host 注入的那个通道转给它。
-            walkieCapability.notify = { [weak app] text in app?.notify?(text) }
-            remoteHost.register(app)
-        }
-        if let manifest = ManifestStore.load(MealCapability.id) {
-            let app = ManifestApp(manifest: manifest, capability: mealCapability)
-            mealCapability.notify = { [weak app] text in app?.notify?(text) }
-            remoteHost.register(app)
-        }
-
         #if os(macOS)
         let codexCapability = CodexCapability(browser: codexBrowser)
+        codexSink = { [weak codexCapability] kind, index, total, text in
+            codexCapability?.handleOutput(kind: kind, index: index, total: total, text: text)
+        }
         #else
         let codexCapability = CodexCapability(
             browser: nil,
             unavailableReason: "Codex 需要在 Mac 上运行:它要启动 codex 命令行进程并读取本机的会话记录,iOS 两者都做不到。"
         )
         #endif
-        #if os(macOS)
-        codexSink = { [weak codexCapability] kind, index, total, text in
-            codexCapability?.handleOutput(kind: kind, index: index, total: total, text: text)
-        }
-        #endif
-        if let manifest = ManifestStore.load(CodexCapability.id) {
-            remoteHost.register(ManifestApp(manifest: manifest, capability: codexCapability))
+
+        // 能力表:清单里的 `capability` 字段 → 这个会话里的能力实例。
+        //
+        // ⚠ 这张表是"加一个应用要不要改代码"的分界线:
+        //   · 加**应用** = 往 AppManifests/ 放一份清单,重新生成 registry.json。
+        //     不碰代码、不重装 app。
+        //   · 加**能力** = 这里加一行。只有真的需要一种新的平台本事时才发生
+        //     (iOS 禁止下载执行代码,这条躲不掉)。
+        //
+        // 以前这里是三段写死的 `ManifestStore.load(XxxCapability.id)`,而
+        // load 读的是 `<id>.json` —— 往目录里放第四份清单**根本没有任何代码
+        // 会去找它**。"加一份数据就多一个应用"当时是句空话。
+        //
+        // 值是工厂而不是实例,因为两类能力的生命周期不一样:walkie/meal/codex
+        // 各自持有这个会话的连接和子进程,全会话共用一个;http 是通用能力,
+        // 每份清单要有自己的配置和轮询,必须一份清单一个实例。
+        // 先取成局部量:这段在 init 里,闭包直接引用 self 的属性会要求显式
+        // 捕获 self,而在 init 里把 self 捕进逃逸闭包是另一类麻烦。
+        let walkie = walkieCapability
+        let meal = mealCapability
+        let capabilityFactories: [String: (String) -> AppCapability] = [
+            WalkieCapability.id: { _ in walkie },
+            MealCapability.id:   { _ in meal },
+            CodexCapability.id:  { _ in codexCapability },
+            HTTPCapability.id:   { manifestID in HTTPCapability(configID: manifestID) },
+        ]
+
+        // 应用实例每会话各 new 一份。RemoteApp 的 requestPush / notify 都是
+        // 单槽赋值,一份实例结构上就服务不了两个 host —— 共用的话第二个
+        // host 的注入会静默覆盖第一个,第一台的那个应用从此推不出任何东西。
+        for manifestID in ManifestStore.allIDs() {
+            guard let manifest = ManifestStore.load(manifestID) else {
+                // 拉不到就没有这个应用,而且要说出来。以前这里会静默退回
+                // bundle 里的内置副本,结果是"从 GitHub 更新"整整坏了几周
+                // 都没人发现 —— 界面上一切正常。
+                log("[session] 清单 \(manifestID) 读不到,这个应用不出现")
+                continue
+            }
+            guard let makeCapability = capabilityFactories[manifest.capability] else {
+                log("[session] 清单 \(manifestID) 要的能力「\(manifest.capability)」这个版本没有,跳过"
+                    + "(可用:\(capabilityFactories.keys.sorted().joined(separator: "/")))")
+                continue
+            }
+            var capability = makeCapability(manifestID)
+            let app = ManifestApp(manifest: manifest, capability: capability)
+            // 通知走 cmd.notify,跟屏幕是两条路 —— 能力自己发不了,得由解释器
+            // 把 host 注入的那个通道转给它。
+            capability.notify = { [weak app] text in app?.notify?(text) }
+            remoteHost.register(app)
         }
 
         walkieClient.sendDeviceControl = { [relay] operation, stream in

@@ -21,6 +21,7 @@ private func check(_ condition: Bool, _ message: String) {
 private final class FakeCapability: AppCapability {
     static let id = "fake"
     var onChange: (() -> Void)?
+    var notify: ((String) -> Void)?
     var value: JSONValue = .object([:])
     var overlayValue: AppOverlay?
     private(set) var performed: [String] = []

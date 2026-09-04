@@ -22,6 +22,12 @@ protocol AppCapability: AnyObject {
     /// 状态变了,该重推一屏。由框架注入。
     var onChange: (() -> Void)? { get set }
 
+    /// 往设备上弹一条全局通知(跟屏幕是两条路)。由框架注入。
+    ///
+    /// 放进协议是为了让注册那一步能统一 —— 以前 walkie 和 meal 各自在
+    /// DeviceSession 里手工接一次线,于是"加一个应用"必须去改那段代码。
+    var notify: ((String) -> Void)? { get set }
+
     /// 有没有挡在内容前面的一层(没配置 / 加载中 / 出错了)。
     var overlay: AppOverlay? { get }
 

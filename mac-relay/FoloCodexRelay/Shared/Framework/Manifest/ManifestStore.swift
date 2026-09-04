@@ -6,14 +6,17 @@ import Foundation
 // 三档,先命中先用:
 //
 //   1. 缓存 —— 上次从 GitHub 拉下来并校验过 sha256 的那份
-//   2. 源码树旁边的 AppManifests/ —— 开发时改完立刻生效,不用重新构建
-//   3. bundle 里的 AppManifests/ —— 随 app 分发的内置版本
+//   2. 源码树旁边的 AppManifests/ —— 只在 macOS 开发时有,改完立刻生效
 //
-// 第 3 档是**兜底**,不是可选项:第一次装、没网、GitHub 打不开的时候,应用
-// 必须照常能用。"从网上更新应用"是锦上添花,不能是运行的前提 —— 否则一次
-// 断网就等于所有应用消失。
+// ⚠ **没有 bundle 兜底**,这是刻意的。
 //
-// 顺序里缓存在最前面:拉到新版本之后立刻生效,不用等下一次构建。
+// 原来有第三档"随 app 分发的内置副本",出发点是"一次断网不该让所有应用
+// 消失"。但它的实际效果是**把失败藏起来**:默认地址曾经指错、连着几周
+// 每次启动都 404,而界面上一切正常 —— 因为内置副本顶上了。等到发现的时候,
+// "从 GitHub 更新应用"这个功能从来没有真正跑通过。
+//
+// 现在的规矩是:拉不到就没有这个应用,并且说出来。少一个图标是看得见的,
+// 静默用着三个月前的旧清单不是。
 // =====================================================================
 
 enum ManifestStore {
@@ -49,15 +52,10 @@ enum ManifestStore {
         #endif
     }
 
-    /// bundle 里那份。
-    private static var bundleDirectory: URL? {
-        Bundle.main.resourceURL?.appendingPathComponent("AppManifests", isDirectory: true)
-    }
-
     /// 按顺序找一份清单。全都没有就返回 nil —— 调用方据此跳过这个应用,
     /// 而不是注册一个画不出东西的空壳。
     static func load(_ id: String) -> AppManifest? {
-        let dirs = [cacheDirectory, sourceDirectory, bundleDirectory].compactMap { $0 }
+        let dirs = [cacheDirectory, sourceDirectory].compactMap { $0 }
         for dir in dirs {
             let url = dir.appendingPathComponent("\(id).json")
             guard let data = FileManager.default.contents(atPath: url.path) else { continue }
@@ -96,6 +94,24 @@ enum ManifestStore {
               local != data else { return }
         log("[manifest] ⚠ \(id) 用的是缓存那份,源码树里的改动没生效。"
             + "清掉:rm -rf \(cacheDirectory.path)")
+    }
+
+    /// 现在手上有哪些清单。
+    ///
+    /// 这是"加一份 JSON 就多一个应用"的前提 —— 在此之前 DeviceSession 是把
+    /// 三个 id 写死在代码里逐个 load 的,往目录里放第四份清单根本没有任何
+    /// 代码会去找它。
+    static func allIDs() -> [String] {
+        var ids: Set<String> = []
+        for dir in [cacheDirectory, sourceDirectory].compactMap({ $0 }) {
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+            for name in names where name.hasSuffix(".json") {
+                let id = String(name.dropLast(5))
+                // registry.json 是目录本身,不是清单。
+                if id != "registry" { ids.insert(id) }
+            }
+        }
+        return ids.sorted()
     }
 
     /// 把拉下来的清单写进缓存。**调用方必须已经校验过 sha256** —— 这里

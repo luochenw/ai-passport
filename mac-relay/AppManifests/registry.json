@@ -12,6 +12,12 @@
     "sha256": "ad03b2a3aa5b509f5173d766167a9afc9c5252b92d58e28ee3e4986c4d3e68ee"
   },
   {
+    "id": "status",
+    "name": "服务状态",
+    "url": "status.json",
+    "sha256": "a024dadd0288b6475f0dc7f90d85cf9ad165ed11216bcbba59bd19b6f9882f4e"
+  },
+  {
     "id": "walkie",
     "name": "对讲机",
     "url": "walkie.json",

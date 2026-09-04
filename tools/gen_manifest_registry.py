@@ -17,6 +17,7 @@ validate.sh —— 让忘记这一步在 CI 里当场失败,而不是留到真�
 
 import hashlib
 import json
+import re
 import pathlib
 import sys
 
@@ -25,7 +26,28 @@ MANIFEST_DIR = ROOT / "mac-relay" / "AppManifests"
 REGISTRY = MANIFEST_DIR / "registry.json"
 
 
+def known_capabilities() -> set:
+    """这个版本的伴侣端提供哪些能力。
+
+    不写死一份列表,而是从各个 `*Capability.swift` 里把 `static let id` 抠出来
+    —— 写死的话它会跟代码悄悄漂开,而漂开的后果正是这个函数要防的那件事。
+
+    为什么要查:清单里的 `capability` 写错(拼错、或者用了更新版本才有的
+    能力),现象是这个应用在设备上**直接不出现**,没有任何报错。目录和摘要
+    都是对的,清单本身也能解析,只是没有代码认领它。这种失败查起来很费劲,
+    所以放在这里当场拦住。
+    """
+    ids = set()
+    pattern = re.compile(r'static\s+let\s+id\s*=\s*"([^"]+)"')
+    for path in (ROOT / "mac-relay/FoloCodexRelay/Shared/Apps").rglob("*Capability.swift"):
+        ids |= set(pattern.findall(path.read_text(encoding="utf-8")))
+    return ids
+
+
 def build() -> str:
+    capabilities = known_capabilities()
+    if not capabilities:
+        sys.exit("一个能力都没扫到,能力文件的命名或位置可能变了")
     entries = []
     for path in sorted(MANIFEST_DIR.glob("*.json")):
         if path.name == REGISTRY.name:
@@ -38,6 +60,10 @@ def build() -> str:
         for field in ("id", "name", "capability", "screens"):
             if field not in manifest:
                 sys.exit(f"{path.name} 缺字段 {field}")
+        if manifest["capability"] not in capabilities:
+            sys.exit(f"{path.name} 要的能力 {manifest['capability']!r} 不存在。\n"
+                     f"这个版本提供:{', '.join(sorted(capabilities))}\n"
+                     f"(能力是原生代码,只能改 app 加;清单只能用已有的)")
         if manifest["id"] != path.stem:
             # 伴侣端按 id 落盘缓存,文件名对不上 id 会让缓存和目录指向两份
             # 不同的东西。
