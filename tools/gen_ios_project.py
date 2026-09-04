@@ -22,30 +22,75 @@ SRC_DIR = "FoloCodexRelay/Shared"
 PROJ = os.path.join(ROOT, REL, "FoloCodexRelay.xcodeproj")
 
 
-def ptt_entitlements():
-    """要不要把 Push to Talk / 推送的 entitlement 编进工程。
+def _flag(name):
+    return os.environ.get(name, "").lower() in ("1", "true", "yes")
 
-    **默认不编**,因为免费的个人开发者 team 拿不到这两项能力,Xcode 会直接
-    拒绝生成描述文件:
+
+def entitlements_line():
+    """要不要把需要付费开发者账号的 entitlement 编进工程,编哪几项。
+
+    Push to Talk / 推送、NFC 标签读写,这几项**都**要求付费 Apple Developer
+    Program(PTT 还额外要 Apple 的授权)。免费个人 team 申请其中任何一项,
+    Xcode 都会直接拒绝生成描述文件:
 
         Personal development teams, including "...", do not support the
         Push to Talk and Push Notifications capabilities.
 
-    而这个 target 是整个仓库唯一的 iOS target —— 一旦签名失败,BLE 中继、
-    配置页、固件页**全都装不上**,不只是对讲机。用免费账号的人会看到一堆
-    描述文件报错,而完全猜不到根因是对讲机的后台唤醒能力。
+    同样的失败模式对 NFC 也成立。而这个 target 是整个仓库唯一的 iOS
+    target —— 一旦签名失败,BLE 中继、配置页、固件页**全都装不上**,不只是
+    出问题的那一个功能。
 
-    关掉之后对讲机照常能用:SystemPushToTalk 初始化失败会退回前台模式
+    ⚠ 每一项单独开关、**默认全关**,不能绑在一起申请:免费账号的人可能只
+    想用 NFC、完全不碰对讲机的后台唤醒(反之亦然)。所以 entitlements 文件
+    不是手工维护的静态内容,而是这个函数按开关**动态生成**再写盘 ——
+    这样才能做到"只申请打开的那几项",不会因为文件里躺着一条没打开的 PTT
+    声明,就把只想要 NFC 的构建也拖进签名失败。
+
+    关掉 PTT 之后对讲机照常能用:SystemPushToTalk 初始化失败会退回前台模式
     (SystemPushToTalk.swift:49/53),WalkieClient 每处使用都用
-    systemPTTAvailable?() 守着。代价只是 iOS 上收不到后台来话唤醒。
+    systemPTTAvailable?() 守着,代价只是 iOS 上收不到后台来话唤醒。
+    关掉 NFC 之后 NFCTagIO.isSupported 返回 false,读写页面会提示"此设备
+    不支持 NFC",不影响其它功能。
 
-    有付费账号、并且已经向 Apple 申请到 PTT 授权的话:
+    有付费账号:
 
-        WALKIE_PTT=1 ./install-ios.sh
+        WALKIE_PTT=1 ./install-ios.sh   # 还需要已向 Apple 申请到的 PTT 授权
+        NFC_TAG=1    ./install-ios.sh
     """
-    if os.environ.get("WALKIE_PTT", "").lower() in ("1", "true", "yes"):
-        return '\n\t\t\t\tCODE_SIGN_ENTITLEMENTS = "FoloCodexRelay/FoloCodexRelay.entitlements";'
-    return ""
+    want_ptt = _flag("WALKIE_PTT")
+    want_nfc = _flag("NFC_TAG")
+
+    entries = []
+    if want_ptt:
+        entries.append("\t<key>aps-environment</key>\n\t<string>$(APS_ENVIRONMENT)</string>")
+        entries.append("\t<key>com.apple.developer.push-to-talk</key>\n\t<true/>")
+    if want_nfc:
+        entries.append(
+            "\t<key>com.apple.developer.nfc.readersession.formats</key>\n"
+            "\t<array>\n\t\t<string>NDEF</string>\n\t</array>"
+        )
+
+    print("  Push to Talk entitlement: " + ("开" if want_ptt else "关(免费账号装不上带这个的 app)"))
+    if not want_ptt:
+        print("    要开:WALKIE_PTT=1,需要付费 team + Apple 的 PTT 授权")
+    print("  NFC 标签读写 entitlement: " + ("开" if want_nfc else "关(免费账号装不上带这个的 app)"))
+    if not want_nfc:
+        print("    要开:NFC_TAG=1,需要付费 team")
+
+    ent_path = os.path.join(ROOT, REL, "FoloCodexRelay", "FoloCodexRelay.entitlements")
+    if not entries:
+        return ""
+
+    body = "\n".join(entries)
+    text = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        "<plist version=\"1.0\">\n<dict>\n" + body + "\n</dict>\n</plist>\n"
+    )
+    with open(ent_path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return '\n\t\t\t\tCODE_SIGN_ENTITLEMENTS = "FoloCodexRelay/FoloCodexRelay.entitlements";'
 
 
 def uid(*parts):
@@ -88,13 +133,7 @@ def main():
         src_children.append(f'\t\t\t\t{fref} /* {name} */,')
         phase_files.append(f'\t\t\t\t{bfile} /* {name} in Sources */,')
 
-    ptt = ptt_entitlements()
-
-    if not ptt:
-
-        print("  Push to Talk entitlement: 关(免费账号装不上带这个的 app)")
-
-        print("    要开:WALKIE_PTT=1,需要付费 team + Apple 的 PTT 授权")
+    sign_entitlements = entitlements_line()
 
 
     ids = {k: uid(k) for k in (
@@ -103,6 +142,7 @@ def main():
         "projconflist", "targetconflist", "projdebug", "projrelease",
         "configphase",
         "targetdebug", "targetrelease", "catalogref", "catalogbuild",
+        "manifestsref", "manifestsbuild",
     )}
 
     # 应用自己的配置随构建打进 bundle。
@@ -131,12 +171,14 @@ def main():
 /* Begin PBXBuildFile section */
 {chr(10).join(build_files)}
 		{ids["catalogbuild"]} /* AppCatalog in Resources */ = {{isa = PBXBuildFile; fileRef = {ids["catalogref"]} /* AppCatalog */; }};
+		{ids["manifestsbuild"]} /* AppManifests in Resources */ = {{isa = PBXBuildFile; fileRef = {ids["manifestsref"]} /* AppManifests */; }};
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 {chr(10).join(file_refs)}
 		{ids["product"]} /* FoloCodexRelay.app */ = {{isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FoloCodexRelay.app; sourceTree = BUILT_PRODUCTS_DIR; }};
 		{ids["catalogref"]} /* AppCatalog */ = {{isa = PBXFileReference; lastKnownFileType = folder; name = AppCatalog; path = AppCatalog; sourceTree = "<group>"; }};
+		{ids["manifestsref"]} /* AppManifests */ = {{isa = PBXFileReference; lastKnownFileType = folder; name = AppManifests; path = AppManifests; sourceTree = "<group>"; }};
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -145,6 +187,7 @@ def main():
 			children = (
 				{ids["sharedgroup"]} /* Shared */,
 				{ids["catalogref"]} /* AppCatalog */,
+				{ids["manifestsref"]} /* AppManifests */,
 				{ids["productgroup"]} /* Products */,
 			);
 			sourceTree = "<group>";
@@ -237,6 +280,7 @@ def main():
 			buildActionMask = 2147483647;
 			files = (
 				{ids["catalogbuild"]} /* AppCatalog in Resources */,
+				{ids["manifestsbuild"]} /* AppManifests in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		}};
@@ -299,7 +343,7 @@ def main():
 			buildSettings = {{
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
 				APS_ENVIRONMENT = development;
-				CODE_SIGN_STYLE = Automatic;{ptt}
+				CODE_SIGN_STYLE = Automatic;{sign_entitlements}
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "FoloCodexRelay/Info-iOS.plist";
@@ -317,7 +361,7 @@ def main():
 			buildSettings = {{
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
 				APS_ENVIRONMENT = production;
-				CODE_SIGN_STYLE = Automatic;{ptt}
+				CODE_SIGN_STYLE = Automatic;{sign_entitlements}
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "FoloCodexRelay/Info-iOS.plist";

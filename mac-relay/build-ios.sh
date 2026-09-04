@@ -47,6 +47,17 @@ swiftc $SOURCES \
 mkdir -p "$APP/AppCatalog"
 cp -R AppCatalog/. "$APP/AppCatalog/" 2>/dev/null || true
 
+# ⚠ 清单必须进 bundle,否则 iPhone 上一个应用都没有。
+#
+# ManifestStore 按三档找清单:缓存 → 源码树旁边的 AppManifests/ → bundle。
+# 第二档是 `#if os(macOS)`,iOS 上直接是 nil;第一档在新装的机器上是空的。
+# 所以 iOS 只剩 bundle 这一档 —— 不拷进来,ManifestStore.load() 每个应用都
+# 返回 nil,DeviceSession 一个都注册不上,界面上就是一份空列表。
+#
+# macOS 上不会暴露这个问题:源码树那一档永远命中,所以本机怎么跑都正常。
+mkdir -p "$APP/AppManifests"
+cp AppManifests/*.json "$APP/AppManifests/" 2>/dev/null || true
+
 # 应用自己的配置随构建打进 bundle。
 #
 # 为什么要这一步:iOS 沙盒里没有家目录,`~/.folotoy/*.json` 那条路只在

@@ -98,6 +98,16 @@ private struct SessionView: View {
                 .tabItem { Label("配置", systemImage: "gearshape") }
             AppStoreView(model: session.appStoreModel)
                 .tabItem { Label("固件", systemImage: "arrow.down.circle") }
+            #if os(iOS)
+            // NFC 跟这台 DeviceSession、跟蓝牙都没关系 —— 手机直接跟设备上
+            // 那颗 NTAG213 标签用 NFC 场通信,不经过 BLE。放进这个 TabView
+            // 只是因为用户此刻大概率正拿着这台设备,不是因为它依赖 session。
+            // Core NFC 只有 iOS 有,macOS 不出这个标签。
+            NavigationStack {
+                NFCToolView()
+            }
+            .tabItem { Label("NFC", systemImage: "wave.3.right.circle") }
+            #endif
         }
     }
 }
