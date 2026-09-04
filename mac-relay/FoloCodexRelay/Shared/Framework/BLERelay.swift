@@ -72,6 +72,17 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
     private var central: CBCentralManager!
 
+    /// app 是不是在后台。
+    ///
+    /// ⚠ 存一份快照,而不是在需要的时候去读 `UIApplication.shared.applicationState`
+    /// —— 那是主线程 API,而 BLE 这边所有代码都跑在 bleQueue 上。跨线程读它
+    /// 拿到的值不可信:前台被当成后台,扫描就会被套上 service 过滤,老固件
+    /// (还不广播 walkie service 的那批)从此扫不到;反过来后台被当成前台,
+    /// iOS 会直接把不带过滤的后台扫描丢掉,等于完全不扫。
+    ///
+    /// 快照由主线程的通知维护,BLE 侧只读。
+    private var isInBackground = false
+
     /// 扫描暂停到什么时候。
     ///
     /// 用**截止时刻**而不是"传输中"的布尔或引用计数,是因为这两种都有同一个
@@ -275,6 +286,21 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     // contain any byte value, including embedded NULs and invalid UTF-8), never a `String`.
 
     func start() {
+        #if os(iOS)
+        // 前后台状态只在主线程上取,取到之后推给 bleQueue 存起来。
+        let center = NotificationCenter.default
+        for (note, background) in [(UIApplication.didEnterBackgroundNotification, true),
+                                   (UIApplication.willEnterForegroundNotification, false)] {
+            center.addObserver(forName: note, object: nil, queue: .main) { [weak self] _ in
+                self?.bleQueue.async { [weak self] in
+                    guard let self, self.isInBackground != background else { return }
+                    self.isInBackground = background
+                    // 过滤条件跟着变了,得把扫描重下一次才生效。
+                    self.restartScanForCurrentState()
+                }
+            }
+        }
+        #endif
         // 恢复上次选的设备,在开扫之前 —— 否则第一轮 didDiscover 会按"没选过"
         // 处理,连上扫到的第一台,然后用户看着它自己跳回去。
         if let saved = UserDefaults.standard.string(forKey: Self.lastDisplayedKey),
@@ -403,8 +429,7 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         // Background discovery only wakes for explicitly requested services.
         // Foreground scanning remains unfiltered so the companion can still
         // discover older firmware and upgrade it to the walkie-capable build.
-        let services: [CBUUID]? = UIApplication.shared.applicationState == .background
-            ? [Self.walkieServiceUUID] : nil
+        let services: [CBUUID]? = isInBackground ? [Self.walkieServiceUUID] : nil
         #else
         let services: [CBUUID]? = nil
         #endif
@@ -531,15 +556,27 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         // 广播包优先、p.name 兜底:p.name 是缓存,设备改名后仍返回旧值。
         let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
             ?? p.name ?? ""
-        #if os(iOS)
-        // Background scans are already filtered by the unique walkie service.
-        // iOS may omit the local name from background advertisements, so do
-        // not reject the only matching peripheral merely because name is nil.
-        let serviceMatched = UIApplication.shared.applicationState == .background
+        // ⚠ 这里判的必须是**广播包里有没有我们的 service**,不是 app 在不在后台。
+        //
+        // 原来这行写的是:
+        //     let serviceMatched = UIApplication.shared.applicationState == .background
+        // 变量名叫 serviceMatched,但它一个 service 都没看过。只要 app 处于
+        // 后台,整个 guard 就退化成 `true || ...` —— **附近每一个 BLE 外设都
+        // 被接受、然后自动连上**。真机日志里就是这个下场:Apple Watch、别人的
+        // iPhone、iPad、Mac,一口气连了 24 台;真正的 FoloPassport 淹在里面反复
+        // 连断,手机上一个应用都出不来。
+        //
+        // 顺带,UIApplication.shared.applicationState 是主线程 API,而这里跑在
+        // bleQueue 上,读它本身就是越界。
+        //
+        // 正确的判据一直就在广播包里:固件把 walkie service 放在广播包、把名字
+        // 放在**扫描响应**里(main/ble_hub.c:171-184)。iOS 后台扫描不一定去要
+        // 扫描响应,所以那时名字可能缺失 —— 但 service UUID 一定在。按它判,
+        // 既保住了"后台广播没名字也认得出自家设备",又不会把别人家的手表收进来。
+        let advertised = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
+        let serviceMatched = advertised.contains(Self.walkieServiceUUID)
+            || advertised.contains(Self.serviceUUID)
         guard serviceMatched || name.hasPrefix(Self.namePrefix) else { return }
-        #else
-        guard name.hasPrefix(Self.namePrefix) else { return }
-        #endif
         let shown = name.isEmpty ? Self.namePrefix : name
         let isNew = discovered[p.identifier] == nil
         if isNew { log("发现设备: \(shown) rssi=\(RSSI) id=\(p.identifier)") }
