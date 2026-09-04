@@ -152,11 +152,19 @@ def main():
     #
     # 用 /bin/sh 写,不用 compgen(那是 bash 内建,Xcode 的脚本阶段默认 sh)。
     config_script = (
-        'rm -f \\"${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}/meal.json\\"\\n'
-        'for f in \\"$HOME\\"/.folotoy/*.json; do\\n'
-        '  [ -e \\"$f\\" ] || continue\\n'
-        '  cp \\"$f\\" \\"${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}/\\"\\n'
-        '  echo \\"\\u5df2\\u6253\\u5305: $(basename \\"$f\\")\\"\\n'
+        # 只拷还存在的应用的配置:清单没了 = 应用没了 = 配置不该再进产物。
+        # 无差别拷 ~/.folotoy/*.json 会把已删应用的凭据一直带到手机上。
+        'rm -f \\"${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}\\"/*.json\\n'
+        'for m in \\"${SRCROOT}\\"/AppManifests/*.json; do\\n'
+        '  [ -e \\"$m\\" ] || continue\\n'
+        '  id=$(basename \\"$m\\" .json)\\n'
+        '  [ \\"$id\\" = registry ] && continue\\n'
+        '  for c in \\"$HOME/.folotoy/apps/$id.json\\" \\"$HOME/.folotoy/$id.json\\"; do\\n'
+        '    [ -f \\"$c\\" ] || continue\\n'
+        '    cp \\"$c\\" \\"${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}/$id.json\\"\\n'
+        '    echo \\"\\u5df2\\u6253\\u5305: $id.json\\"\\n'
+        '    break\\n'
+        '  done\\n'
         'done'
     )
 

@@ -700,7 +700,29 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         // 唤醒之后另外几台就再也回不来了(它们还连着,但没有 link,收到的
         // 回调会被逐个丢掉)。
         guard let restored = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] else { return }
+        // ⚠ 恢复列表也必须过滤。
+        //
+        // didDiscover 那道门只拦扫描发现的设备,**恢复这条路完全绕过它** ——
+        // 而 iOS 会把这个 app 连过的每一台外设都持久化进恢复集合。didDiscover
+        // 那个把"app 在不在后台"当成"service 匹配上没有"的 bug,让它连过
+        // Apple Watch、别人的 iPhone、iPad、Mac,于是每次启动这里都会恢复出
+        // 二十几台、并逐个 connect:连接槽被垃圾占满,真设备进不来,界面上
+        // 就一直停在"寻找设备"。真机日志里恢复了 25 台。
+        //
+        // 恢复的时候没有广播包可看,只能用缓存的 GAP 名。名字对不上就不但
+        // 跳过,还要 cancelPeripheralConnection —— 不主动断,iOS 会一直把它
+        // 留在恢复集合里,下次启动再来一遍。
+        //
+        // 会不会误伤真设备?不会:被跳过的设备照常由扫描重新发现,而那边现在
+        // 是按广播里的 service UUID 认的,不依赖名字。
+        var kept: [CBPeripheral] = []
         for p in restored {
+            guard p.name?.hasPrefix(Self.namePrefix) == true else {
+                log("恢复列表里跳过并断开非本项目设备:\(p.name ?? "(无名)") \(p.identifier)")
+                central.cancelPeripheralConnection(p)
+                continue
+            }
+            kept.append(p)
             links[p.identifier] = links[p.identifier] ?? DeviceLink(peripheral: p)
             p.delegate = self
             if p.state == .connected {
@@ -708,9 +730,10 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             } else {
                 central.connect(p, options: nil)
             }
-            log("恢复 BLE 外设状态:\(p.identifier)")
+            log("恢复 BLE 外设状态:\(p.name ?? "?") \(p.identifier)")
         }
-        if displayedID == nil { displayedID = restored.first?.identifier }
+        log("恢复集合共 \(restored.count) 台,其中本项目设备 \(kept.count) 台")
+        if displayedID == nil { displayedID = kept.first?.identifier }
     }
 
     // MARK: 供界面调用的连接控制

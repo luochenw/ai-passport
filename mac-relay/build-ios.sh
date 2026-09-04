@@ -66,11 +66,31 @@ cp AppManifests/*.json "$APP/AppManifests/" 2>/dev/null || true
 #
 # ⚠ 这意味着口令会躺在构建产物里。自己用没问题,但**产物不能随便发给
 # 别人**。仓库里始终没有这些文件。
-if compgen -G "$HOME/.folotoy/*.json" > /dev/null; then
-    cp "$HOME"/.folotoy/*.json "$APP/" 2>/dev/null || true
-    echo "已打包应用配置: $(ls -1 "$HOME"/.folotoy/*.json | xargs -n1 basename | tr '\n' ' ')"
+# ⚠ 只拷**还存在的应用**的配置,不要 `cp ~/.folotoy/*.json`。
+#
+# 无差别拷的后果:面板应用删掉之后,它的 dashboard.json(里面有 NAS 地址和
+# 凭据)照样被打进每一个构建产物,躺在手机上,而已经没有任何代码会读它。
+# 白白多一份带凭据的文件在产物里。
+#
+# 判据用 AppManifests/ 里有哪些清单 —— 应用没了清单也就没了,配置自然
+# 跟着不再打包。新老两个位置都找:apps/<id>.json 是现在的,<id>.json 是
+# 单文件时代的老位置。
+packed=""
+for manifest in AppManifests/*.json; do
+    id="$(basename "$manifest" .json)"
+    [[ "$id" == "registry" ]] && continue
+    for candidate in "$HOME/.folotoy/apps/$id.json" "$HOME/.folotoy/$id.json"; do
+        if [[ -f "$candidate" ]]; then
+            cp "$candidate" "$APP/$id.json"
+            packed="$packed $id.json"
+            break
+        fi
+    done
+done
+if [[ -n "$packed" ]]; then
+    echo "已打包应用配置:$packed"
 else
-    echo "注意: ~/.folotoy/ 下没有 .json,需要配置的应用会显示「未配置」"
+    echo "注意: ~/.folotoy/ 下没有对应的配置,需要配置的应用会显示「未配置」"
 fi
 
 if [[ "$MODE" == "--device" ]]; then
