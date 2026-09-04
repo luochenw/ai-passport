@@ -15,9 +15,10 @@ static const char *TAG = "boot_chime";
 
 // 开机音效的音量(百分比,bsp_audio_set_volume 收的就是 0-100)。
 //
-// 刻意跟用户配置的播放音量分开:开机提示音是每次上电都会响一次的东西,按正常
-// 播放音量放会很吵。原来是 5%,实际听下来太小,调到 20%。
-#define BOOT_CHIME_VOLUME 20
+// 刻意跟用户配置的播放音量分开:开机提示音每次上电都会响一次,跟着用户那个
+// 播放音量走的话,把音量开大之后每次开机都会被吓一跳。所以它有自己的常量,
+// 放完再把音量交还给用户的设置(见下面的 s_restore_volume)。
+#define BOOT_CHIME_VOLUME 50
 
 // EMBED_FILES 生成的符号名取自文件名,见 main/CMakeLists.txt。
 extern const uint8_t boot_chime_pcm_start[] asm("_binary_boot_chime_pcm_start");
