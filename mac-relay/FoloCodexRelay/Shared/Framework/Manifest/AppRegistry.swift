@@ -34,20 +34,23 @@ enum AppRegistry {
     ///     defaults write com.folotoy.codexrelay manifests.registryBase \\
     ///         "https://raw.githubusercontent.com/<你的账号>/ai-passport/<分支>/mac-relay/AppManifests/"
     ///
-    /// ⚠ 默认值指向**上游 main**。这些清单还在功能分支上,没合进去之前
-    /// 这个地址是 404 —— 拉取会失败、退回内置那份、日志里留一行。功能是
-    /// 好的,只是还没有东西可拉。想现在就验证整条链路,用上面那条命令
-    /// 指到自己的分支。
+    /// 默认值指向**这个仓库自己的 main**,而不是上游。
     ///
-    /// 不把个人仓库地址写死进源码:这个仓库跟着上游走,源码里不该出现
-    /// 某个人的账号名。
+    /// 一开始写的是上游 FoloToy/ai-passport,理由是"源码里不该出现某个人的
+    /// 账号名"。那个理由在这里不成立,而且代价是功能根本不工作:清单是这个
+    /// 仓库的产物,上游没有也不会有,于是每次启动都是
+    ///     [registry] 拉取失败 HTTP 404
+    /// 一直在用 bundle 里那份内置副本 —— "从 GitHub 更新应用"从未真正跑通过。
+    ///
+    /// 而且这个仓库并不是上游的 fork(GitHub 上 fork=false,没有 parent),
+    /// 它就是这些清单的发布地。分发地址指向发布地是本来就该有的样子。
     private static let baseKey = "manifests.registryBase"
 
     static var base: URL? {
         if let s = UserDefaults.standard.string(forKey: baseKey), let u = URL(string: s) {
             return u
         }
-        return URL(string: "https://raw.githubusercontent.com/FoloToy/ai-passport/main/mac-relay/AppManifests/")
+        return URL(string: "https://raw.githubusercontent.com/luochenw/ai-passport/main/mac-relay/AppManifests/")
     }
 
     static func setBase(_ urlString: String) {
