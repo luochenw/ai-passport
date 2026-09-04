@@ -16,6 +16,7 @@
 #include "bsp_battery.h"
 #include "bsp_pins.h"      // 错误日志里要打印 BSP_LCD_* 引脚号
 #include "boot_chime.h"
+#include "boot_image.h"
 #include "appstore_transfer.h"
 #include "ble_hub.h"
 #include "remote_ui.h"
@@ -956,6 +957,11 @@ void app_main(void) {
         return;
     }
     bsp_display_backlight(100);
+
+    // 开机画面先铺上,再去做后面那些耗时的初始化(配置、音效、BLE、页面)。
+    // 顺序反了的话它只会在一切都好了之后闪一下,那正是它要填住的那段空窗。
+    // 没配开机图时这是个空函数,见 boot_image.c。
+    boot_image_show();
 
     // 配置要先读出来:init_shared_hardware() 里播开机音效,而音效放完需要把
     // 音量恢复成用户配置的值 —— 那个值得先在手上。

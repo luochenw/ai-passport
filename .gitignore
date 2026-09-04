@@ -17,3 +17,7 @@ build-dashboard/
 # Xcode 的**每个用户各自的**界面状态和 scheme 管理。跟代码无关,
 # 而且是二进制,提交进去只会在多人协作时天天冲突。
 xcuserdata/
+
+# 开机画面是私人照片的逐像素副本(人脸、水印都在里面),不进公开仓库。
+# 需要的人自己跑 tools/gen_boot_image.py 生成。
+assets/boot_image.rgb565
