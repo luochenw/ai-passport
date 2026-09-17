@@ -9,6 +9,7 @@
 #include "ui_pixel.h"
 #include "ui_statusbar.h"
 
+#include "esp_app_desc.h"
 #include "lvgl.h"
 #include <stdbool.h>
 
@@ -36,6 +37,12 @@ static lv_obj_t *s_list_cards[APPSTORE_LIST_VISIBLE_ROWS];
 static lv_obj_t *s_list_rows[APPSTORE_LIST_VISIBLE_ROWS];
 static lv_obj_t *s_progress_label;   // APPSTORE_VIEW_INSTALLING 专用,居中显示进度/错误
 static lv_timer_t *s_timer;
+
+static const char *running_firmware_version(void)
+{
+    const esp_app_desc_t *app = esp_app_get_description();
+    return app && app->version[0] ? app->version : "unknown";
+}
 
 static void move_selection(int *sel, int count, bool up)
 {
@@ -110,17 +117,17 @@ static void tick(lv_timer_t *timer)
     switch (appstore_transfer_get_state()) {
     case APPSTORE_TRANSFER_STARTING:
         lv_obj_remove_flag(s_status, LV_OBJ_FLAG_HIDDEN);
-        lv_label_set_text(s_status, "正在启动蓝牙...");
+        lv_label_set_text_fmt(s_status, "v%s · 正在启动蓝牙", running_firmware_version());
         break;
     case APPSTORE_TRANSFER_ADVERTISING:
         lv_obj_remove_flag(s_status, LV_OBJ_FLAG_HIDDEN);
-        lv_label_set_text(s_status, "正在广播,等待连接");
+        lv_label_set_text_fmt(s_status, "v%s · 等待连接", running_firmware_version());
         break;
     case APPSTORE_TRANSFER_CONNECTED:
         if (s_view == APPSTORE_VIEW_LIST) {
             lv_obj_remove_flag(s_status, LV_OBJ_FLAG_HIDDEN);
-            lv_label_set_text(s_status,
-                appstore_transfer_app_count() > 0 ? "选择要安装的固件" : "加载中");
+            lv_label_set_text_fmt(s_status, "v%s · %s", running_firmware_version(),
+                appstore_transfer_app_count() > 0 ? "选择固件" : "加载中");
         } else {
             lv_obj_add_flag(s_status, LV_OBJ_FLAG_HIDDEN);
         }

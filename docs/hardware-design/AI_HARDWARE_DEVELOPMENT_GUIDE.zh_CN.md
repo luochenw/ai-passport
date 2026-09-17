@@ -188,7 +188,7 @@ I2C0 使用 SDA GPIO10、SCL GPIO7。ES8311 地址为 7 bit `0x18`，CW2017 为 
 
 ## 8. ES8311 音频
 
-MCU 是 I2S master，ES8311 是 slave；I2S0 的 TX/RX 全双工通道共享 MCLK/BCLK/WS。当前数据通路为标准 I2S、16 bit slot 设置、双 slot 物理总线，但对外演示以 16 kHz/16 bit/单声道 PCM 打开 codec。
+MCU 是 I2S master，ES8311 是 slave；I2S0 的 TX/RX 全双工通道共享 MCLK/BCLK/WS。所有受维护的音频路径均以 16 kHz/16 bit/单声道 PCM 打开 codec，因此初始 DMA 也按单声道分配。
 
 | 信号 | GPIO | 数据方向 |
 | --- | ---: | --- |
@@ -207,7 +207,7 @@ MCU 是 I2S master，ES8311 是 slave；I2S0 的 TX/RX 全双工通道共享 MCL
 - `no_dac_ref=true` 对单声道麦克风录音是必要的；改为 false 会让读入通道成为 DAC reference，表现为录音恒零。
 - 麦克风模拟输入增益当前为 30 dB；输出音量 API 为 0–100%。增益和音量不是同一个概念。
 - `bsp_audio_read/write` 是阻塞调用，不能放在按键回调或 LVGL 任务中。
-- I2S DMA 当前为 6 个 descriptor、每个 240 frame。更改 DMA 或 LVGL buffer 前必须联合评估内部 RAM。
+- I2S DMA 当前为 6 个 descriptor、每个 240 个单声道 frame；若初始使用双声道 slot，在第一次格式切换前会额外占用约 5.7 KB。更改 DMA 或 LVGL buffer 前必须联合评估内部 RAM。
 
 Audio demo 使用独立 4 KB 栈任务：OK 播放 1 秒 1 kHz 方波，UP 录 3 秒再回放。录音缓冲约 96 KB，是当前最显著的瞬时堆分配，可能因碎片或其他功能增大而失败。新增长录音应优先采用分块流式处理或外部存储，不可假设存在 PSRAM。
 

@@ -12,6 +12,12 @@ cd "$(dirname "$0")"
 
 MODE="${1:---simulator}"
 
+# Keep the bundled firmware and its visible metadata inseparable. A clean
+# checkout intentionally has no generated BIN and must build firmware first.
+python3 ../tools/update_firmware_catalog.py --check \
+    --firmware AppCatalog/current-firmware.bin \
+    --catalog AppCatalog/catalog.json
+
 # 只编 Shared/。macOS/ 那两个文件(HeadlessCodexSender 起子进程跑 codex、
 # CodexBrowserModel 读 ~/.codex/sessions)在 iOS 上根本不成立 —— 前者被内核
 # 禁止,后者沙盒里没有那个目录。它们不参与 iOS 构建,而 Shared/ 里没有任何
@@ -47,19 +53,16 @@ swiftc $SOURCES \
 mkdir -p "$APP/AppCatalog"
 cp -R AppCatalog/. "$APP/AppCatalog/" 2>/dev/null || true
 
-# 应用自己的配置随构建打进 bundle。
-#
-# 为什么要这一步:iOS 沙盒里没有家目录,`~/.folotoy/*.json` 那条路只在
-# macOS 上成立。bundle 两端都有,所以把配置在构建时拷进去,应用一行平台
-# 判断都不用写(见 DashboardApp.config)。
-#
-# ⚠ 这意味着口令会躺在构建产物里。自己用没问题,但**产物不能随便发给
-# 别人**。仓库里始终没有这些文件。
-if compgen -G "$HOME/.folotoy/*.json" > /dev/null; then
-    cp "$HOME"/.folotoy/*.json "$APP/" 2>/dev/null || true
-    echo "已打包应用配置: $(ls -1 "$HOME"/.folotoy/*.json | xargs -n1 basename | tr '\n' ' ')"
+mkdir -p "$APP/AppManifests"
+cp -R AppManifests/. "$APP/AppManifests/" 2>/dev/null || true
+
+# iOS 只能从 bundle 读取首次启动配置。显式开启时，从标准本地目录提取
+# meal/walkie 的 server 字段；token 等字段始终丢弃，仍由应用写入钥匙串。
+if [ "${FOLO_BUNDLE_CONFIG:-0}" = "1" ]; then
+    python3 bundle-app-configs.py "$APP"
 else
-    echo "注意: ~/.folotoy/ 下没有 .json,需要配置的应用会显示「未配置」"
+    rm -f "$APP/meal.json" "$APP/walkie.json"
+    echo "应用服务地址未打包。需要时用 FOLO_BUNDLE_CONFIG=1 ./build-ios.sh"
 fi
 
 if [[ "$MODE" == "--device" ]]; then

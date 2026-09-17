@@ -1,0 +1,28 @@
+[Unit]
+Description=AI Passport ByteDance Canteen service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ai-passport
+Group=ai-passport
+EnvironmentFile=-/etc/ai-passport/services.env
+ExecStart=/usr/local/lib/ai-passport/meal-server -listen 0.0.0.0:8788 -state /var/lib/ai-passport/meal-state.json
+Restart=always
+RestartSec=3
+StateDirectory=ai-passport
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

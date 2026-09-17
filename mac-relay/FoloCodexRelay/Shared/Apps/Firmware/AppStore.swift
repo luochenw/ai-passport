@@ -11,11 +11,10 @@ struct AppCatalogEntry: Identifiable {
     let id = UUID()
     let name: String
     let description: String
+    let version: String
+    let sizeBytes: Int
+    let sha256: String
     let binURL: URL
-
-    var sizeBytes: Int {
-        (try? FileManager.default.attributesOfItem(atPath: binURL.path)[.size] as? Int) ?? 0
-    }
 }
 
 // Not @MainActor -- this codebase uses plain GCD (DispatchQueue) throughout, not Swift
@@ -26,6 +25,9 @@ struct AppCatalogEntry: Identifiable {
 final class AppStoreModel: ObservableObject {
     @Published var catalog: [AppCatalogEntry] = []
     @Published var statusText: String = "等待设备连接..."
+    /// Running image version reported from esp_app_desc_t over the config STATUS
+    /// characteristic. Older firmware does not report this key, which remains nil.
+    @Published var deviceFirmwareVersion: String?
 
     /// 设备连没连上。由入口接 BLERelay.onLinkChange 填。
     ///
@@ -40,7 +42,9 @@ final class AppStoreModel: ObservableObject {
     ///     原因是压根没连设备。
     @Published var isConnected = false {
         didSet {
-            guard isConnected != oldValue, !isInstalling else { return }
+            guard isConnected != oldValue else { return }
+            if !isConnected { deviceFirmwareVersion = nil }
+            guard !isInstalling else { return }
             statusText = isConnected ? "设备已连接" : "等待设备连接..."
         }
     }
@@ -61,12 +65,16 @@ final class AppStoreModel: ObservableObject {
     private let sendBatch: (_ chunks: [Data], _ completion: @escaping () -> Void) -> Void
     private let workQueue = DispatchQueue(label: "com.folotoy.codexrelay.appstore")
 
-    /// One chunk is ~500 bytes; a batch is sent entirely as write-without-response (no
-    /// per-chunk round trip), then this process waits for one APPSTORE_EVT_PROGRESS
-    /// confirming the whole batch before sending the next one. 64 chunks (~32KB) keeps
-    /// each round trip's "how much do we lose if this batch needs a retry" small while
-    /// still amortizing the wait-for-ack overhead over a meaningful amount of data.
-    private static let batchSize = 64
+    /// A batch is sent entirely as write-without-response (no per-chunk round trip), then
+    /// this process waits for one APPSTORE_EVT_PROGRESS confirming the whole batch before
+    /// sending the next one.
+    ///
+    /// With the old 64-chunk window an iPhone could accept only the first ~13 packets
+    /// locally while the device prepared its OTA partition; the BATCH_END marker on
+    /// packet 64 never reached the device, so neither side could advance. Keep every
+    /// sender below the device's 12-entry OTA queue: each acknowledged batch fully drains
+    /// before the next one starts, so this also gives the receiver deterministic backpressure.
+    private static let batchSize = 8
     /// How long to wait for a batch's progress ack before assuming it (or the ack itself)
     /// got lost and resending. Generous on purpose -- resending is idempotent (the device
     /// skips chunks it already wrote) but not free, so this shouldn't be trigger-happy on
@@ -175,18 +183,32 @@ final class AppStoreModel: ObservableObject {
             log("[appstore] 读不到 \(catalogFile.path),最新固件不可用")
             return
         }
-        struct Entry: Decodable { let name: String; let description: String; let bin: String }
+        struct Entry: Decodable {
+            let name: String
+            let description: String
+            let version: String
+            let size: Int
+            let sha256: String
+            let bin: String
+        }
         guard let entries = try? JSONDecoder().decode([Entry].self, from: data) else {
             log("[appstore] catalog.json 解析失败,最新固件不可用")
             return
         }
         let latest = entries.lazy.compactMap { e -> AppCatalogEntry? in
             let binURL = catalogDir.appendingPathComponent(e.bin)
-            guard FileManager.default.fileExists(atPath: binURL.path) else {
+            guard let firmware = try? Data(contentsOf: binURL) else {
                 log("[appstore] 目录条目 \"\(e.name)\" 指向的文件不存在: \(binURL.path),跳过")
                 return nil
             }
-            return AppCatalogEntry(name: e.name, description: e.description, binURL: binURL)
+            let actualHash = Digest.sha256Hex(firmware)
+            guard firmware.count == e.size, actualHash == e.sha256.lowercased() else {
+                log("[appstore] 目录条目 \"\(e.name)\" 的 size/sha256 与内置固件不一致,跳过")
+                return nil
+            }
+            return AppCatalogEntry(name: e.name, description: e.description,
+                                   version: e.version, sizeBytes: e.size,
+                                   sha256: e.sha256.lowercased(), binURL: binURL)
         }.first
         catalog = latest.map { [$0] } ?? []
         log("[appstore] 最新固件\(latest == nil ? "不可用" : "已加载")")
@@ -241,7 +263,7 @@ final class AppStoreModel: ObservableObject {
         log("[appstore] 收到请求: REQ_LIST_APPS,共 \(catalog.count) 个应用")
         let total = UInt16(min(catalog.count, 65535))
         for (i, entry) in catalog.enumerated() {
-            let line = "\(entry.name) - \(entry.description)"
+            let line = "\(entry.name) v\(entry.version) - \(entry.description)"
             let payload = Data(line.utf8)
             sender(AppStoreKind.item, UInt16(i), total, payload)
         }
@@ -296,6 +318,47 @@ final class AppStoreModel: ObservableObject {
 
     var latestFirmware: AppCatalogEntry? { catalog.first }
 
+    var installDisposition: FirmwareInstallDisposition {
+        guard let firmware = latestFirmware else { return .unknown }
+        return .classify(device: deviceFirmwareVersion, bundled: firmware.version)
+    }
+
+    var actionTitle: String {
+        switch installDisposition {
+        case .upgrade:   return "更新固件"
+        case .reinstall: return "重新安装"
+        case .downgrade: return "降级固件"
+        case .unknown:   return "安装固件"
+        }
+    }
+
+    var comparisonText: String {
+        guard let firmware = latestFirmware else { return "没有可用的内置固件" }
+        switch installDisposition {
+        case .upgrade:
+            return "可从 \(deviceFirmwareVersion ?? "未知") 更新到 \(firmware.version)"
+        case .reinstall:
+            return "设备已是同版本；可以手动重新安装 \(firmware.version)"
+        case .downgrade:
+            return "内置版本 \(firmware.version) 低于设备版本 \(deviceFirmwareVersion ?? "未知")"
+        case .unknown:
+            return "无法比较版本；旧版固件可能尚未上报版本号"
+        }
+    }
+
+    var requiresRiskConfirmation: Bool {
+        installDisposition == .downgrade || installDisposition == .unknown
+    }
+
+    /// Accept status keys without coupling the firmware panel to all of
+    /// DeviceConfigModel's Wi-Fi and display settings.
+    func applyDeviceStatus(_ pairs: [(String, String)]) {
+        if let version = pairs.last(where: { $0.0 == "firmware.version" })?.1,
+           !version.isEmpty {
+            deviceFirmwareVersion = version
+        }
+    }
+
     /// 伴侣端唯一的更新入口。设备端请求仍使用索引 0，与同一份固件对应。
     func updateLatestFirmware() {
         workQueue.async { [weak self] in self?.installApp(at: 0) }
@@ -344,11 +407,16 @@ final class AppStoreModel: ObservableObject {
             guard let self = self, var s = self.session, s.generation == generation else { return }
             s.consecutiveTimeouts += 1
             if s.consecutiveTimeouts >= Self.maxConsecutiveTimeouts {
-                log("[appstore] 连续 \(s.consecutiveTimeouts) 次批次确认超时(约 \(Int(Double(s.consecutiveTimeouts) * Self.batchTimeout)) 秒无响应),放弃这次安装 -- 设备可能已经离开应用商店页面或断开连接")
+                log("[appstore] 连续 \(s.consecutiveTimeouts) 次批次确认超时(约 \(Int(Double(s.consecutiveTimeouts) * Self.batchTimeout)) 秒无响应),取消本机待发送分片并放弃这次安装")
+                // Stop a flow-control continuation that may still be parked in BLERelay.
+                // Without this, the UI says the install ended while a delayed
+                // isReadyToSendWriteWithoutResponse callback can continue feeding stale
+                // chunks into the device after the session has already been discarded.
+                self.cancelTransfer()
                 self.session = nil
                 DispatchQueue.main.async {
                     self.isInstalling = false
-                    self.lastError = "安装中止:设备长时间无响应(已离开应用商店页面或断开连接?)"
+                    self.lastError = "安装中止:30 秒未收到设备进度,请等待设备退出安装或重启后重试"
                 }
                 return
             }
@@ -399,6 +467,7 @@ final class AppStoreModel: ObservableObject {
 
 struct AppStoreView: View {
     @ObservedObject var model: AppStoreModel
+    @State private var showRiskConfirmation = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -421,16 +490,28 @@ struct AppStoreView: View {
                         .frame(width: 32)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(firmware.name).font(.headline)
-                        Text(ByteCountFormatter.string(fromByteCount: Int64(firmware.sizeBytes),
-                                                       countStyle: .file))
+                        Text("内置版本：\(firmware.version)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        Text("设备当前版本：\(model.deviceFirmwareVersion ?? "未知")")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("\(ByteCountFormatter.string(fromByteCount: Int64(firmware.sizeBytes), countStyle: .file)) · SHA-256 \(firmware.sha256.prefix(12))…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(model.comparisonText)
+                            .font(.caption)
+                            .foregroundColor(model.installDisposition == .downgrade ? .orange : .secondary)
                     }
                     Spacer()
                     Button {
-                        model.updateLatestFirmware()
+                        if model.requiresRiskConfirmation {
+                            showRiskConfirmation = true
+                        } else {
+                            model.updateLatestFirmware()
+                        }
                     } label: {
-                        Label("更新固件", systemImage: "arrow.down.circle")
+                        Label(model.actionTitle, systemImage: "arrow.down.circle")
                     }
                     .disabled(model.isInstalling || !model.isConnected)
                 }
@@ -465,5 +546,11 @@ struct AppStoreView: View {
         #if os(macOS)
         .frame(minWidth: 460, minHeight: 380)
         #endif
+        .alert("确认安装固件？", isPresented: $showRiskConfirmation) {
+            Button("取消", role: .cancel) { }
+            Button(model.actionTitle, role: .destructive) { model.updateLatestFirmware() }
+        } message: {
+            Text(model.comparisonText)
+        }
     }
 }

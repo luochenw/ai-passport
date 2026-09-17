@@ -23,6 +23,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "host/ble_att.h"
 #include "host/ble_gap.h"
 #include "host/ble_gatt.h"
 #include "host/ble_hs.h"
@@ -138,26 +139,54 @@ static uint8_t        s_chunk_buf[APPSTORE_CHUNK_BUF_LEN];
 // esp_ota_write() 挪到 ota_write_task() 里异步做,两边只通过队列打交道。
 #define OTA_CHUNK_DATA_MAX   (APPSTORE_CHUNK_BUF_LEN - 6)   // 单个分片最大原始字节数
 #define OTA_QUEUE_DEPTH      12                             // 缓冲量,吸收 flash 偶尔跟不上的抖动
+// 伴侣端连续 30 秒收不到批次确认就会放弃本次发送。设备端再多留 5 秒给最后
+// 一批/重连机会;超过这个窗口仍没有新分片,就必须 esp_ota_abort() 回收句柄,
+// 否则 s_ota_active 会永远卡住,下一次安装只能被误当成上一次的重传。
+#define OTA_IDLE_TIMEOUT_MS  35000
 
 typedef struct {
     uint8_t data[OTA_CHUNK_DATA_MAX];
     int     len;
     bool    is_end;
     bool    is_batch_end;   // 见 APPSTORE_FLAG_BATCH_END
+    uint32_t session_id;    // 超时/失败后迟到的旧分片不能混进下一次安装
 } ota_chunk_msg_t;
 
 static QueueHandle_t    s_ota_queue;
 static TaskHandle_t     s_ota_task;
+// NimBLE host task produces chunks while ota_write_task consumes them. This mutex only
+// protects the small in-RAM state transitions below; flash APIs and BLE indications are
+// deliberately called after releasing it.
+static SemaphoreHandle_t s_ota_state_mutex;
 static esp_ota_handle_t s_ota_handle;
 static bool             s_ota_active;      // 是否已经 esp_ota_begin() 成功、还没 esp_ota_end()
 static bool             s_ota_failed;      // 这次安装过程中是否已经出过错(出错后续分片直接丢弃)
 static bool             s_abort_sent;      // 这次安装是否已经通知过 Mac 中止,避免每个分片都重发一遍
+static bool             s_ota_transitioning; // 正在 begin/end/abort,新 START 必须稍后重试
 static int              s_install_total;   // 本次安装总分片数(来自协议 total 字段)
 static int              s_install_received;// 已经实际写完 flash 的分片数,用于显示进度
 // 已经收进队列的分片数。跟 s_install_received 之间隔着 s_ota_queue 这个异步
 // 队列,所以两者会短暂不相等 —— 判断"下一片该是谁"必须用这个,而向对端上报
 // "从哪继续发"也必须用这个(对端要接着发的是还没被收下的那一片)。
 static int              s_install_accepted;
+// 每开始一次全新的 OTA 就递增。取消时也会先递增作废旧值,这样即使超时判定
+// 与 NimBLE 回调恰好交错,已经进队列/刚刚迟到的旧消息也只会被丢弃。
+static uint32_t         s_ota_session_id;
+static TickType_t       s_ota_last_activity_tick;
+static bool             s_ota_owner_valid;
+static uint8_t          s_ota_owner_addr_type;
+static uint8_t          s_ota_owner_addr[6];
+
+static bool ota_state_lock(void)
+{
+    return s_ota_state_mutex &&
+           xSemaphoreTake(s_ota_state_mutex, portMAX_DELAY) == pdTRUE;
+}
+
+static void ota_state_unlock(void)
+{
+    xSemaphoreGive(s_ota_state_mutex);
+}
 
 // ---- 错误提示:钉住直到用户按键确认(跟 demo_codex.c 的 s_error_pinned 是同
 // 一个模式,但这里是完全独立的一份状态 —— 两个页面不共享任何东西)。
@@ -222,7 +251,14 @@ static void appstore_send_cmd(uint8_t req, uint8_t param_a, uint8_t param_b)
 // CMD indicate 现成的 param_a/param_b 里——分片数上千,1 字节装不下。
 static void appstore_send_progress(void)
 {
-    uint16_t received = (uint16_t)s_install_accepted;
+    uint16_t received = 0;
+    if (!ota_state_lock()) return;
+    if (!s_ota_active || s_ota_failed || s_ota_transitioning) {
+        ota_state_unlock();
+        return;
+    }
+    received = (uint16_t)s_install_accepted;
+    ota_state_unlock();
     appstore_send_cmd(APPSTORE_EVT_PROGRESS,
                       (uint8_t)(received & 0xFF), (uint8_t)(received >> 8));
 }
@@ -252,24 +288,122 @@ static void appstore_dispatch_item(void)
 // 保证一次写坏的镜像不会真的被启动。
 static void appstore_finish_install(void)
 {
+    if (!ota_state_lock()) return;
+    if (!s_ota_active) {
+        ota_state_unlock();
+        return;
+    }
+
+    esp_ota_handle_t handle = s_ota_handle;
+    bool failed = s_ota_failed;
+    // 先在锁内原子地作废当前会话并阻止新 START,再到锁外收尾句柄。
+    // esp_ota_end/abort 都不在互斥区内,不会拖住 NimBLE host task。
+    s_ota_session_id++;
     s_ota_active = false;
-    if (s_ota_failed) {
-        esp_ota_end(s_ota_handle);   // 即使已知失败也要收尾一下句柄,不留资源
+    s_ota_transitioning = true;
+    ota_state_unlock();
+
+    if (failed) {
+        esp_err_t abort_err = esp_ota_abort(handle);
+        if (abort_err != ESP_OK) {
+            ESP_LOGW(TAG, "esp_ota_abort 失败: %s", esp_err_to_name(abort_err));
+        }
+        xQueueReset(s_ota_queue);
         s_error_pinned = true;
         snprintf(s_error_text, sizeof(s_error_text), "安装失败:写入过程出错");
         s_dirty = true;
+        if (ota_state_lock()) {
+            s_install_total = 0;
+            // 错误内容先发布,最后才开放新 START,避免旧会话在新会话开始后
+            // 又把它的错误覆盖到屏幕上。
+            s_ota_transitioning = false;
+            ota_state_unlock();
+        }
         return;
     }
-    esp_err_t err = esp_ota_end(s_ota_handle);
+    esp_err_t err = esp_ota_end(handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_end 失败: %s", esp_err_to_name(err));
+        xQueueReset(s_ota_queue);
         s_error_pinned = true;
         snprintf(s_error_text, sizeof(s_error_text), "安装失败:镜像校验未通过");
         s_dirty = true;
+        if (ota_state_lock()) {
+            s_install_total = 0;
+            s_ota_transitioning = false;
+            ota_state_unlock();
+        }
         return;
     }
     ESP_LOGI(TAG, "固件写入完成,校验通过,即将重启切换到新应用");
-    main_boot_into_appslot();   // 不会返回
+    main_boot_into_appslot();   // 正常时重启,仅 bootflag 写入失败时返回
+
+    // 只有 bootflag 分区异常时才可能返回。此时镜像虽已校验通过,但没有切换
+    // 启动分区;解除 transitioning 以免永久锁死后续安装,并明确报错。
+    s_error_pinned = true;
+    snprintf(s_error_text, sizeof(s_error_text), "安装失败:无法切换启动分区");
+    s_dirty = true;
+    if (ota_state_lock()) {
+        s_ota_failed = true;
+        s_install_total = 0;
+        s_ota_transitioning = false;
+        ota_state_unlock();
+    }
+}
+
+// 一段时间没有任何新分片时取消当前 OTA。这里只能由 ota_write_task 调用,
+// 因而不会跟 esp_ota_write() 同时操作同一个 handle。取消只释放 IDF 的 OTA
+// 上下文并丢弃队列,绝不写 bootflag;appslot 里已经写入的半成品会在下一次
+// OTA 的增量擦除过程中被覆盖,设备仍从原来的 factory 正常启动。
+static void appstore_abort_idle_install(void)
+{
+    if (!ota_state_lock()) return;
+    TickType_t idle_ticks = xTaskGetTickCount() - s_ota_last_activity_tick;
+    // 必须在跟生产者相同的锁内重新检查队列和时间。否则刚在超时判断后入队
+    // 的恢复分片会被误杀。锁内只做状态切换,Flash API 留到锁外。
+    if (!s_ota_active || s_ota_failed ||
+        uxQueueMessagesWaiting(s_ota_queue) != 0 ||
+        idle_ticks < pdMS_TO_TICKS(OTA_IDLE_TIMEOUT_MS)) {
+        ota_state_unlock();
+        return;
+    }
+
+    esp_ota_handle_t handle = s_ota_handle;
+    int accepted = s_install_accepted;
+    int total = s_install_total;
+    bool send_abort = !s_abort_sent;
+
+    s_ota_session_id++;
+    s_ota_active = false;
+    s_ota_failed = true;
+    s_abort_sent = true;
+    s_ota_transitioning = true;
+    s_install_total = 0;
+    s_install_received = 0;
+    s_install_accepted = 0;
+    ota_state_unlock();
+
+    // transitioning 在 abort 完成前保持 true,因此新的 START 只会收到临时
+    // ATT 错误并由伴侣端重试,绝不会把新 handle 交给这里的旧会话清理掉。
+    xQueueReset(s_ota_queue);
+
+    esp_err_t err = esp_ota_abort(handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "空闲超时后 esp_ota_abort 失败: %s", esp_err_to_name(err));
+    }
+    ESP_LOGW(TAG, "OTA 等待分片超时,已安全取消 (%d/%d)", accepted, total);
+
+    if (send_abort) {
+        appstore_send_cmd(APPSTORE_EVT_INSTALL_ABORTED, 0, 0);
+    }
+    s_error_pinned = true;
+    snprintf(s_error_text, sizeof(s_error_text), "安装已取消:等待数据超时");
+    s_dirty = true;
+    if (ota_state_lock()) {
+        // 所有旧会话的可见结果都发布完以后,才允许新的 START 进入。
+        s_ota_transitioning = false;
+        ota_state_unlock();
+    }
 }
 
 // 真正做 esp_ota_write() 的地方,独立任务,只通过 s_ota_queue 跟
@@ -289,37 +423,123 @@ static void ota_write_task(void *arg)
     for (;;) {
         ota_chunk_msg_t msg;
         if (xQueueReceive(s_ota_queue, &msg, pdMS_TO_TICKS(200)) == pdTRUE) {
-            if (s_ota_active && !s_ota_failed && msg.len > 0) {
-                esp_err_t err = esp_ota_write(s_ota_handle, msg.data, (size_t)msg.len);
-                if (err != ESP_OK) {
-                    ESP_LOGE(TAG, "esp_ota_write 失败: %s", esp_err_to_name(err));
-                    s_ota_failed = true;
-                }
+            if (!ota_state_lock()) continue;
+            // 取消/失败会递增 session_id。迟到的旧消息只丢弃,不能把它写到
+            // 下一次安装的新 handle 里。
+            if (!s_ota_active || msg.session_id != s_ota_session_id) {
+                ota_state_unlock();
+                continue;
             }
-            if (s_ota_failed && !s_abort_sent) {
+
+            esp_ota_handle_t handle = s_ota_handle;
+            bool should_write = !s_ota_failed && msg.len > 0;
+            ota_state_unlock();
+
+            // Flash 写入可能耗时,不能持有状态锁。只有本任务会 write/end/abort,
+            // 所以取出的 handle 在这次调用期间不会被另一任务释放。
+            esp_err_t write_err = ESP_OK;
+            if (should_write) {
+                write_err = esp_ota_write(handle, msg.data, (size_t)msg.len);
+            }
+
+            bool failed = false;
+            bool send_abort = false;
+            if (!ota_state_lock()) continue;
+            if (!s_ota_active || msg.session_id != s_ota_session_id) {
+                ota_state_unlock();
+                continue;
+            }
+            if (write_err != ESP_OK) {
+                ESP_LOGE(TAG, "esp_ota_write 失败: %s", esp_err_to_name(write_err));
+                s_ota_failed = true;
+            }
+            failed = s_ota_failed;
+            if (failed && !s_abort_sent) {
                 s_abort_sent = true;
+                send_abort = true;
+            }
+            if (!failed) {
+                s_install_received++;
+            }
+            ota_state_unlock();
+
+            if (send_abort) {
                 appstore_send_cmd(APPSTORE_EVT_INSTALL_ABORTED, 0, 0);
             }
-            s_install_received++;
             s_dirty = true;
+            if (failed) {
+                appstore_finish_install();
+                continue;
+            }
             // 每写完一批就上报一次进度,Mac 那边攒够一批 write-without-response
             // 之后就是在等这个——不用每片都等 ATT 层确认,靠这个周期性回执
             // 知道"这批真的写完了,可以发下一批了"。
             // 每批恰好上报一次:Mac 攒够一批 write-without-response 全部发出后
             // 就在等这一条,收到才发下一批,不用每片都等 ATT 层确认。上报时机
             // 完全由对端打在最后一片上的 BATCH_END 标志决定,理由见该宏的注释。
-            if (!s_ota_failed && msg.is_batch_end) {
+            if (msg.is_batch_end) {
                 appstore_send_progress();
             }
             if (msg.is_end) {
-                if (!s_ota_failed) appstore_send_progress();   // 最后一批不满一个批量周期,补发一次
+                appstore_send_progress();   // 最后一批不满一个批量周期,补发一次
                 appstore_finish_install();
             }
         }
-        if (s_ota_failed && s_ota_active) {
+
+        bool finish_failed = false;
+        if (ota_state_lock()) {
+            finish_failed = s_ota_failed && s_ota_active;
+            ota_state_unlock();
+        }
+        if (finish_failed) {
             appstore_finish_install();
+        } else {
+            // helper 会跟 NimBLE 生产者拿同一把锁并在锁内重验 queue/tick。
+            appstore_abort_idle_install();
         }
     }
+}
+
+// OTA 队列和写入任务占用十几 KB 内存，但应用目录同步完全用不到它们。
+// 只在首个固件 START 到达时创建；状态锁让重复 START/并发回调只会创建一组
+// 资源。若本次内存不足，清掉半成品并返回失败，发送端重试 START 时会再试。
+static bool ensure_ota_worker(void)
+{
+    if (!ota_state_lock()) {
+        ESP_LOGE(TAG, "OTA 状态锁不可用,无法创建接收任务");
+        return false;
+    }
+    if (s_ota_queue && s_ota_task) {
+        ota_state_unlock();
+        return true;
+    }
+    if (s_ota_task && !s_ota_queue) {
+        // 正常路径不会出现；避免给一个已经运行的任务换掉队列句柄。
+        ESP_LOGE(TAG, "OTA 接收任务状态不一致");
+        ota_state_unlock();
+        return false;
+    }
+
+    if (!s_ota_queue) {
+        s_ota_queue = xQueueCreate(OTA_QUEUE_DEPTH, sizeof(ota_chunk_msg_t));
+        if (!s_ota_queue) {
+            ESP_LOGE(TAG, "创建 OTA 写入队列失败,等待下一次 START 重试");
+            ota_state_unlock();
+            return false;
+        }
+    }
+
+    TaskHandle_t task = NULL;
+    if (xTaskCreate(ota_write_task, "appstore_ota", 4096, NULL, 4, &task) != pdPASS) {
+        ESP_LOGE(TAG, "创建 OTA 写入任务失败,等待下一次 START 重试");
+        vQueueDelete(s_ota_queue);
+        s_ota_queue = NULL;
+        ota_state_unlock();
+        return false;
+    }
+    s_ota_task = task;
+    ota_state_unlock();
+    return true;
 }
 
 // ⚠ 这个回调跑在 NimBLE host 任务里,不是 LVGL 任务 —— 不碰任何 LVGL 对象。
@@ -329,6 +549,7 @@ static void ota_write_task(void *arg)
 static int appstore_data_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                                    struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
+    if (!ble_hub_is_authorized_conn(conn_handle)) return BLE_ATT_ERR_INSUFFICIENT_AUTHOR;
     (void)conn_handle;
     (void)attr_handle;
     (void)arg;
@@ -384,24 +605,72 @@ static int appstore_data_access_cb(uint16_t conn_handle, uint16_t attr_handle,
     }
 
     if (kind == APPSTORE_KIND_FIRMWARE) {
+        if ((!s_ota_queue || !s_ota_task) &&
+            (!is_start || !ensure_ota_worker())) {
+            ESP_LOGE(TAG, "OTA 接收资源不足,拒绝固件分片");
+            return BLE_ATT_ERR_INSUFFICIENT_RES;
+        }
+
         // 只在真正第一次开始时才 esp_ota_begin()。如果 s_ota_active 已经是
         // true,说明这是一次重传抵达的 chunk 0(Mac 那边等批量确认超时、把
         // 整批——包括开头这片——重新发了一遍),绝不能再调一次
         // esp_ota_begin()(会把已经写进去的部分整个擦掉!),直接落到下面
         // 当普通分片处理,交给下面"已经写过就跳过"那段逻辑接住。
-        if (is_start && !s_ota_active) {
+        struct ble_gap_conn_desc owner_desc;
+        if (ble_gap_conn_find(conn_handle, &owner_desc) != 0) {
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        bool start_new_session = false;
+        if (is_start) {
+            if (!ota_state_lock()) return BLE_ATT_ERR_UNLIKELY;
+            if (!s_ota_active && !s_ota_transitioning) {
+                s_ota_transitioning = true;
+                s_ota_owner_valid = true;
+                s_ota_owner_addr_type = owner_desc.peer_id_addr.type;
+                memcpy(s_ota_owner_addr, owner_desc.peer_id_addr.val,
+                       sizeof(s_ota_owner_addr));
+                start_new_session = true;
+            } else if (!s_ota_active) {
+                // 上一次 handle 正在锁外 abort/end。暂时拒绝即可,伴侣端会重试;
+                // 绝不能此时创建新 handle,否则旧清理路径可能误伤新会话。
+                ota_state_unlock();
+                return BLE_ATT_ERR_UNLIKELY;
+            }
+            ota_state_unlock();
+        }
+
+        if (!ota_state_lock()) return BLE_ATT_ERR_UNLIKELY;
+        bool owner_matches = !s_ota_owner_valid ||
+            (s_ota_owner_addr_type == owner_desc.peer_id_addr.type &&
+             memcmp(s_ota_owner_addr, owner_desc.peer_id_addr.val,
+                    sizeof(s_ota_owner_addr)) == 0);
+        ota_state_unlock();
+        if (!owner_matches) return BLE_ATT_ERR_INSUFFICIENT_AUTHOR;
+
+        if (start_new_session) {
+            // 新会话已经独占 transitioning;先清掉上一轮的提示,后续若 begin
+            // 本身失败会再写入本轮错误。
+            s_error_pinned = false;
+            s_error_text[0] = '\0';
+            s_dirty = true;
+            if (!ota_state_lock()) return BLE_ATT_ERR_UNLIKELY;
+            s_ota_session_id++;
             s_install_total = total;
             s_install_received = 0;
             s_install_accepted = 0;
             s_ota_failed = false;
             s_abort_sent = false;
+            s_ota_last_activity_tick = xTaskGetTickCount();
+            ota_state_unlock();
+
+            esp_err_t begin_err = ESP_OK;
+            esp_ota_handle_t new_handle = 0;
+            const char *begin_error_text = NULL;
             const esp_partition_t *part = find_appslot_partition();
             if (!part) {
                 ESP_LOGE(TAG, "找不到 appslot 分区");
-                s_ota_failed = true;
-                s_error_pinned = true;
-                snprintf(s_error_text, sizeof(s_error_text), "安装失败:找不到安装分区");
-                s_dirty = true;
+                begin_err = ESP_ERR_NOT_FOUND;
+                begin_error_text = "安装失败:找不到安装分区";
             } else {
                 const esp_partition_t *running = esp_ota_get_running_partition();
                 if (running && running->address == part->address) {
@@ -411,25 +680,53 @@ static int appstore_data_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                     // existing timeout/retry path sends chunk zero again.
                     ESP_LOGI(TAG, "当前运行于 appslot,先重启回 factory 再更新");
                     main_restart_to_factory_for_update();   // 成功时不会返回
-                    return 0;
+                    begin_err = ESP_FAIL;
+                    begin_error_text = "安装失败:无法返回启动器";
                 }
-                esp_err_t err = esp_ota_begin(part, OTA_SIZE_UNKNOWN, &s_ota_handle);
-                if (err != ESP_OK) {
-                    // esp_ota_begin() 还没成功过,s_ota_active 从没变过 true——
-                    // 这里直接同步收尾/报错,不走 ota_write_task() 那条路径
-                    // (那边靠 s_ota_active 才知道"有没有一个真句柄需要
-                    // esp_ota_end()",这里从一开始就没有,不能让它去调)。
-                    ESP_LOGE(TAG, "esp_ota_begin 失败: %s", esp_err_to_name(err));
-                    s_ota_failed = true;
-                    s_error_pinned = true;
-                    snprintf(s_error_text, sizeof(s_error_text), "安装失败:无法开始写入");
-                    s_dirty = true;
-                } else {
-                    s_ota_active = true;
+                if (begin_err == ESP_OK) {
+                    // OTA_SIZE_UNKNOWN 会在这个 NimBLE 回调里同步擦除整个
+                    // 3.63 MiB appslot。顺序增量模式只建立句柄;擦除随写入任务
+                    // 的连续写入按扇区进行。
+                    begin_err = esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES,
+                                              &new_handle);
+                    if (begin_err != ESP_OK) {
+                        ESP_LOGE(TAG, "esp_ota_begin 失败: %s",
+                                 esp_err_to_name(begin_err));
+                        begin_error_text = "安装失败:无法开始写入";
+                    }
                 }
             }
-            if (s_ota_failed && !s_abort_sent) {
-                s_abort_sent = true;
+
+            bool send_abort = false;
+            if (!ota_state_lock()) {
+                if (begin_err == ESP_OK) esp_ota_abort(new_handle);
+                return BLE_ATT_ERR_UNLIKELY;
+            }
+            if (begin_err == ESP_OK) {
+                s_ota_handle = new_handle;
+                s_ota_active = true;
+            } else {
+                s_ota_failed = true;
+                s_ota_owner_valid = false;
+                s_install_total = 0;
+                s_install_received = 0;
+                s_install_accepted = 0;
+                if (!s_abort_sent) {
+                    s_abort_sent = true;
+                    send_abort = true;
+                }
+            }
+            // 所有本轮状态写完后再开放下一次 START。
+            s_ota_transitioning = false;
+            ota_state_unlock();
+
+            if (begin_err != ESP_OK) {
+                s_error_pinned = true;
+                snprintf(s_error_text, sizeof(s_error_text), "%s",
+                         begin_error_text ? begin_error_text : "安装失败:无法开始写入");
+                s_dirty = true;
+            }
+            if (send_abort) {
                 appstore_send_cmd(APPSTORE_EVT_INSTALL_ABORTED, 0, 0);
             }
         }
@@ -447,36 +744,71 @@ static int appstore_data_access_cb(uint16_t conn_handle, uint16_t attr_handle,
         // 比较的是 s_install_accepted(已收进队列的)而不是 s_install_received
         // (已真正写完 flash 的):两者之间隔着一个异步队列,用后者会把还在队列
         // 里排队、其实完全合法的后续分片误判成跳跃全部拒收,传输直接卡死。
-        if (s_ota_active && !s_ota_failed && index != (uint16_t)s_install_accepted) {
+        bool active = false;
+        bool failed = false;
+        bool index_mismatch = false;
+        bool send_abort = false;
+        if (!ota_state_lock()) return BLE_ATT_ERR_UNLIKELY;
+        active = s_ota_active;
+        failed = s_ota_failed;
+        if (s_ota_transitioning) {
+            ota_state_unlock();
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        if (active && !failed && index != (uint16_t)s_install_accepted) {
+            index_mismatch = true;
+        }
+        ota_state_unlock();
+
+        if (index_mismatch) {
             appstore_send_progress();
             return 0;
         }
 
         // 只管把这个分片的原始字节拷进队列、立刻回响应——真正的 flash 写入
         // 交给 ota_write_task() 异步做,这次 ATT 响应不会被 flash 操作拖慢。
-        if (s_ota_active && !s_ota_failed) {
+        if (active && !failed) {
             ota_chunk_msg_t msg;
             msg.len = frag_len > 0 ? frag_len : 0;
             if (msg.len > (int)sizeof(msg.data)) msg.len = (int)sizeof(msg.data);  // 防御性,理论上不会触发
             if (msg.len > 0) memcpy(msg.data, frag, (size_t)msg.len);
             msg.is_end = is_end;
             msg.is_batch_end = is_batch_end;
-            // 超时而不是一直等:队列满说明 flash 写入速度长期跟不上蓝牙收
-            // 分片的速度,继续囤下去只会越攒越多,不如直接判定这次安装失败。
-            if (xQueueSend(s_ota_queue, &msg, pdMS_TO_TICKS(500)) == pdTRUE) {
+
+            if (!ota_state_lock()) return BLE_ATT_ERR_UNLIKELY;
+            // timeout transition 与 enqueue 共用这把锁并会在锁内重验空闲条件。
+            // 若等待锁期间状态已变化,当前分片必须拒绝,不能塞进下一会话。
+            if (!s_ota_active || s_ota_failed || s_ota_transitioning ||
+                index != (uint16_t)s_install_accepted) {
+                failed = s_ota_failed || !s_ota_active;
+                ota_state_unlock();
+                if (!failed) appstore_send_progress();
+                return failed ? BLE_ATT_ERR_UNLIKELY : 0;
+            }
+            msg.session_id = s_ota_session_id;
+            // enqueue 与 timeout 的状态切换共用一把锁,所以必须非阻塞。伴侣端
+            // 每批不超过队列容量;若队列仍满,说明 flash 已长期跟不上,直接
+            // 中止比在 NimBLE 回调里持锁等待 500ms 更安全。
+            if (xQueueSend(s_ota_queue, &msg, 0) == pdTRUE) {
                 s_install_accepted++;
+                s_ota_last_activity_tick = xTaskGetTickCount();
             } else {
                 ESP_LOGE(TAG, "OTA 写入队列已满(flash 写入跟不上),判定安装失败");
                 s_ota_failed = true;
                 if (!s_abort_sent) {
                     s_abort_sent = true;
-                    appstore_send_cmd(APPSTORE_EVT_INSTALL_ABORTED, 0, 0);
+                    send_abort = true;
                 }
                 // 这个分片真的丢了(没进队列),ota_write_task() 不会知道
                 // "收到过 is_end"——但它自己的 200ms 超时轮询会发现
                 // s_ota_failed 已经变 true,照样能收尾、钉住错误提示,不用
                 // 在这里越俎代庖去调 esp_ota_end()(那样跟消费任务可能同时
                 // 摸同一个 handle,产生竞态)。
+            }
+            failed = s_ota_failed;
+            ota_state_unlock();
+            if (send_abort) {
+                appstore_send_cmd(APPSTORE_EVT_INSTALL_ABORTED, 0, 0);
             }
         }
 
@@ -486,7 +818,7 @@ static int appstore_data_access_cb(uint16_t conn_handle, uint16_t attr_handle,
         // CMD 中止通知那一条独立信道慢慢传过去。现在双保险:ATT 层错误让
         // CoreBluetooth 的 didWriteValueFor 立刻报错、Mac 自己的分片队列
         // 清空逻辑马上生效,不用完全依赖那条中止通知。
-        return s_ota_failed ? BLE_ATT_ERR_UNLIKELY : 0;
+        return (!active || failed) ? BLE_ATT_ERR_UNLIKELY : 0;
     }
 
     ESP_LOGW(TAG, "未知的消息 kind: %d,忽略", kind);
@@ -539,9 +871,8 @@ static const struct ble_gatt_svc_def s_gatt_svcs[] = {
 // 没在广播,配套 app 连都连不上 —— "在电脑上点一下就装过去"根本无从谈起。
 // 现在协议栈由 ble_hub 常驻持有,这里只注册 service 和观察者。
 //
-// 相应地,OTA 接收能力(队列 + 写入任务)也必须常驻而不是随页面创建:对端
-// 随时可能推固件过来,那一刻用户可能正停在任何界面上,没有任务在跑就等于
-// 分片全部丢弃。
+// GATT service 常驻；OTA 队列和写入任务在首个 FIRMWARE START 到达时才创建，
+// 因此目录同步和普通 BLE 连接不会提前占用固件安装所需的十几 KB RAM。
 
 static void on_ble_connect(uint16_t conn_handle)
 {
@@ -563,9 +894,18 @@ static void on_ble_subscribe(uint16_t attr_handle, bool subscribed)
     // (CONNECT 时对端还没订阅,indicate 必然失败)。但如果这是"安装中途断线
     // 后重连",要发的不是"列一下目录",而是当前进度 —— 让对端知道接着从哪
     // 继续发,不用把几千个分片从头重传。
-    if (s_ota_active && !s_ota_failed) {
+    bool resume_install = false;
+    int accepted = 0;
+    int total = 0;
+    if (ota_state_lock()) {
+        resume_install = s_ota_active && !s_ota_failed;
+        accepted = s_install_accepted;
+        total = s_install_total;
+        ota_state_unlock();
+    }
+    if (resume_install) {
         ESP_LOGI(TAG, "对端重新订阅,安装仍在进行中,补发当前进度 (%d/%d)",
-                 s_install_accepted, s_install_total);
+                 accepted, total);
         appstore_send_progress();
     } else {
         appstore_send_cmd(APPSTORE_REQ_LIST_APPS, 0, 0);
@@ -580,6 +920,14 @@ static const ble_hub_observer_t s_ble_observer = {
 
 void appstore_transfer_register(void)
 {
+    // register() 发生在 ble_hub_init() 之前,必须在 GATT 回调有机会运行前就
+    // 建好状态锁。队列/任务由首个固件 START 懒创建。
+    if (!s_ota_state_mutex) {
+        s_ota_state_mutex = xSemaphoreCreateMutex();
+        if (!s_ota_state_mutex) {
+            ESP_LOGE(TAG, "创建 OTA 状态锁失败");
+        }
+    }
     ble_hub_register_service(s_gatt_svcs);
     ble_hub_register_observer(&s_ble_observer);
 }
@@ -588,20 +936,25 @@ void appstore_transfer_init(void)
 {
     reset_app_cache();
     memset(&s_acc, 0, sizeof(s_acc));
-    s_ota_active = false;
-    s_ota_failed = false;
+    if (!s_ota_state_mutex) {
+        s_ota_state_mutex = xSemaphoreCreateMutex();
+    }
+    if (ota_state_lock()) {
+        s_ota_handle = 0;
+        s_ota_active = false;
+        s_ota_failed = false;
+        s_abort_sent = false;
+        s_ota_transitioning = false;
+        s_install_total = 0;
+        s_install_received = 0;
+        s_install_accepted = 0;
+        s_ota_session_id = 0;
+        s_ota_last_activity_tick = xTaskGetTickCount();
+        s_ota_owner_valid = false;
+        ota_state_unlock();
+    }
     s_error_pinned = false;
-    s_install_total = 0;
-    s_install_received = 0;
-    s_install_accepted = 0;
     s_dirty = true;
-
-    if (!s_ota_queue) {
-        s_ota_queue = xQueueCreate(OTA_QUEUE_DEPTH, sizeof(ota_chunk_msg_t));
-    }
-    if (!s_ota_task && s_ota_queue) {
-        xTaskCreate(ota_write_task, "appstore_ota", 4096, NULL, 4, &s_ota_task);
-    }
 }
 
 // ---- appstore_transfer.h 对外接口 -------------------------------------------
@@ -633,25 +986,73 @@ const char *appstore_transfer_app_text(int index)
 
 void appstore_transfer_install(int index)
 {
-    s_install_total = 0;
-    s_install_received = 0;
+    if (ota_state_lock()) {
+        s_install_total = 0;
+        s_install_received = 0;
+        ota_state_unlock();
+    }
     s_dirty = true;
     appstore_send_cmd(APPSTORE_REQ_INSTALL_APP, (uint8_t)index, 0);
 }
 
 bool appstore_transfer_is_installing(void)
 {
-    return s_install_total > 0 || s_ota_active;
+    // pinned error 也必须把固件页切到安装视图,否则远程发起后若在 begin 阶段
+    // 就失败(total 已清零),用户进页面只会看到列表,看不到失败原因。按键调用
+    // clear_error() 后该条件自然解除。
+    bool installing = s_error_pinned;
+    if (ota_state_lock()) {
+        installing = installing || s_install_total > 0 ||
+                     s_ota_active || s_ota_transitioning;
+        ota_state_unlock();
+    }
+    return installing;
+}
+
+bool appstore_transfer_is_active(void)
+{
+    bool active = false;
+    if (ota_state_lock()) {
+        active = s_install_total > 0 || s_ota_active || s_ota_transitioning;
+        ota_state_unlock();
+    }
+    return active;
+}
+
+bool appstore_transfer_peer_can_resume(uint8_t addr_type, const uint8_t addr[6])
+{
+    if (!addr) return false;
+    bool allowed = true;
+    if (ota_state_lock()) {
+        bool owned_install = s_ota_owner_valid &&
+                             (s_ota_active || s_ota_transitioning || s_install_total > 0);
+        if (owned_install) {
+            allowed = s_ota_owner_addr_type == addr_type &&
+                      memcmp(s_ota_owner_addr, addr, sizeof(s_ota_owner_addr)) == 0;
+        }
+        ota_state_unlock();
+    }
+    return allowed;
 }
 
 int appstore_transfer_install_received(void)
 {
-    return s_install_received;
+    int received = 0;
+    if (ota_state_lock()) {
+        received = s_install_received;
+        ota_state_unlock();
+    }
+    return received;
 }
 
 int appstore_transfer_install_total(void)
 {
-    return s_install_total;
+    int total = 0;
+    if (ota_state_lock()) {
+        total = s_install_total;
+        ota_state_unlock();
+    }
+    return total;
 }
 
 bool appstore_transfer_error_pending(void)

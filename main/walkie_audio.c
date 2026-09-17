@@ -60,6 +60,8 @@ static uint16_t s_uplink_handle;
 static uint16_t s_status_handle;
 static QueueHandle_t s_rx_queue;
 static TaskHandle_t s_worker_task;
+static portMUX_TYPE s_worker_create_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_worker_creating;
 // 单次发话的硬上限,见下面循环里的说明。
 #define WALKIE_TX_MAX_US (60 * 1000000LL)
 
@@ -74,6 +76,57 @@ static walkie_audio_activity_fn s_activity_hook;
 
 static int16_t s_pcm[WALKIE_AUDIO_FRAME_SAMPLES];
 static uint8_t s_frame[WALKIE_AUDIO_FRAME_MAX_SIZE];
+
+static void worker_task(void *arg);
+
+// 对讲任务直到第一次真正收发音频时才需要。用互斥锁串行化 CONTROL_START
+// 和 DOWNLINK 两条创建路径；创建失败会删除半成品，下一次写入可以重试。
+static bool ensure_worker(void)
+{
+    portENTER_CRITICAL(&s_worker_create_lock);
+    if (s_rx_queue && s_worker_task) {
+        portEXIT_CRITICAL(&s_worker_create_lock);
+        return true;
+    }
+    if (s_worker_creating || s_worker_task) {
+        // 另一条写入路径正在创建时立即失败，让对端稍后重试；不要在 NimBLE
+        // 回调里等待动态分配或任务调度。
+        portEXIT_CRITICAL(&s_worker_create_lock);
+        return false;
+    }
+    s_worker_creating = true;
+    portEXIT_CRITICAL(&s_worker_create_lock);
+
+    QueueHandle_t queue = xQueueCreate(WALKIE_RX_QUEUE_DEPTH,
+                                       sizeof(walkie_rx_message_t));
+    if (!queue) {
+        ESP_LOGE(TAG, "创建对讲播放队列失败,等待下一次写入重试");
+        portENTER_CRITICAL(&s_worker_create_lock);
+        s_worker_creating = false;
+        portEXIT_CRITICAL(&s_worker_create_lock);
+        return false;
+    }
+    // worker_task 启动后立即读取全局队列，所以必须在 xTaskCreate 前发布句柄。
+    portENTER_CRITICAL(&s_worker_create_lock);
+    s_rx_queue = queue;
+    portEXIT_CRITICAL(&s_worker_create_lock);
+
+    TaskHandle_t task = NULL;
+    if (xTaskCreate(worker_task, "walkie_audio", 4096, NULL, 5, &task) != pdPASS) {
+        ESP_LOGE(TAG, "创建对讲音频任务失败,等待下一次写入重试");
+        portENTER_CRITICAL(&s_worker_create_lock);
+        s_rx_queue = NULL;
+        s_worker_creating = false;
+        portEXIT_CRITICAL(&s_worker_create_lock);
+        vQueueDelete(queue);
+        return false;
+    }
+    portENTER_CRITICAL(&s_worker_create_lock);
+    s_worker_task = task;
+    s_worker_creating = false;
+    portEXIT_CRITICAL(&s_worker_create_lock);
+    return true;
+}
 
 static void send_status(uint8_t event, uint8_t code)
 {
@@ -237,7 +290,7 @@ static void worker_task(void *arg)
 static int control_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                              struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
-    (void)conn_handle;
+    if (!ble_hub_is_authorized_conn(conn_handle)) return BLE_ATT_ERR_INSUFFICIENT_AUTHOR;
     (void)attr_handle;
     (void)arg;
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
@@ -253,6 +306,10 @@ static int control_access_cb(uint16_t conn_handle, uint16_t attr_handle,
     }
 
     if (payload[1] == WALKIE_CONTROL_START && len >= 4) {
+        if (!ensure_worker()) {
+            send_status(WALKIE_STATUS_ERROR, 5);
+            return BLE_ATT_ERR_INSUFFICIENT_RES;
+        }
         if (s_rx_active || (s_rx_queue && uxQueueMessagesWaiting(s_rx_queue) > 0)) {
             send_status(WALKIE_STATUS_ERROR, 3);
             return 0;
@@ -268,11 +325,10 @@ static int control_access_cb(uint16_t conn_handle, uint16_t attr_handle,
 static int downlink_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                               struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
-    (void)conn_handle;
+    if (!ble_hub_is_authorized_conn(conn_handle)) return BLE_ATT_ERR_INSUFFICIENT_AUTHOR;
     (void)attr_handle;
     (void)arg;
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
-    if (!s_rx_queue) return BLE_ATT_ERR_UNLIKELY;
     if (s_tx_requested || s_tx_active) return 0;
 
     uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
@@ -287,6 +343,10 @@ static int downlink_access_cb(uint16_t conn_handle, uint16_t attr_handle,
     walkie_audio_frame_info_t info;
     if (!walkie_audio_frame_decode(msg.bytes, msg.len, &info, NULL, 0, NULL)) {
         return BLE_ATT_ERR_UNLIKELY;
+    }
+    if (!ensure_worker()) {
+        send_status(WALKIE_STATUS_ERROR, 5);
+        return BLE_ATT_ERR_INSUFFICIENT_RES;
     }
 
     if (info.flags & WALKIE_AUDIO_FLAG_START) {
@@ -375,17 +435,8 @@ void walkie_audio_register(void)
 
 void walkie_audio_init(void)
 {
-    if (s_rx_queue) return;
-    s_rx_queue = xQueueCreate(WALKIE_RX_QUEUE_DEPTH, sizeof(walkie_rx_message_t));
-    if (!s_rx_queue) {
-        ESP_LOGE(TAG, "创建对讲播放队列失败");
-        return;
-    }
-    if (xTaskCreate(worker_task, "walkie_audio", 4096, NULL, 5, &s_worker_task) != pdPASS) {
-        ESP_LOGE(TAG, "创建对讲音频任务失败");
-        vQueueDelete(s_rx_queue);
-        s_rx_queue = NULL;
-    }
+    // 静态状态已经初始化。队列和 4096-byte worker stack 由首次
+    // CONTROL_START 或合法 DOWNLINK 写入按需创建。
 }
 
 void walkie_audio_set_activity_hook(walkie_audio_activity_fn fn)

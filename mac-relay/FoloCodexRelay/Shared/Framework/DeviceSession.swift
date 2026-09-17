@@ -161,12 +161,19 @@ final class DeviceSession {
             },
             bleDisconnect: { [relay] in relay.disconnectDevice(deviceID) },
             bleRescan: { [relay] in relay.rescanDevice(deviceID) },
+            trustSender: { [relay] operation, value, completion in
+                relay.sendAuthCommand(operation, value: value, to: deviceID,
+                                      completion: completion)
+            },
             // ⚠ 音量、亮度、状态栏是**这一台设备**的设置,不是这台电脑的。
             // 共用一份的话在 A 上调亮度,B 的滑块下次启动也跟着变,而 B 的
             // 屏幕其实没动过 —— 用户在两台之间来回改,永远调不对。
             deviceKey: deviceID.uuidString,
             enableDebugChannel: enableDebugChannel
         )
+        if let auth = relay.authSnapshot(for: deviceID) {
+            deviceConfigModel.applyAuthSnapshot(auth)
+        }
 
         // 应用实例每会话各 new 一份。RemoteApp 的 requestPush / notify 都是
         // 单槽赋值,一份实例结构上就服务不了两个 host —— 共用的话第二个
@@ -229,6 +236,7 @@ final class DeviceSession {
         case 1: remoteHost.setDeviceActive(a == 1)  // 进/出远程界面
         case 2: remoteHost.deviceReady(active: a == 1, appIndex: b)
         case 3: remoteHost.openApp(a)               // 首屏选中第 a 项(0xFE = 应用商店)
+        case 4: remoteHost.uninstallApp(at: a)       // 首屏长按已安装应用
         default: break
         }
     }
@@ -248,7 +256,16 @@ final class DeviceSession {
     }
 
     func handleDeviceStatus(_ pairs: [(String, String)]) {
-        DispatchQueue.main.async { self.deviceConfigModel.applyDeviceStatus(pairs) }
+        DispatchQueue.main.async {
+            self.deviceConfigModel.applyDeviceStatus(pairs)
+            self.appStoreModel.applyDeviceStatus(pairs)
+        }
+    }
+
+    func handleAuthSnapshot(_ snapshot: CompanionAuthSnapshot) {
+        DispatchQueue.main.async {
+            self.deviceConfigModel.applyAuthSnapshot(snapshot)
+        }
     }
 
     /// 链路断了。会话对象**留着**(浏览位置、身份都还在,重连不用从首屏

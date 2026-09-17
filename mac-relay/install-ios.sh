@@ -13,8 +13,18 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-BUNDLE_ID="com.folotoy.codexrelay"
+BUNDLE_ID="${BUNDLE_ID:-com.folotoy.codexrelay}"
+export BUNDLE_ID
+FOLO_BUNDLE_CONFIG="${FOLO_BUNDLE_CONFIG:-1}"
+export FOLO_BUNDLE_CONFIG
 SCHEME="FoloCodexRelay"
+
+# Never sign an app with a missing or stale firmware payload. The firmware tab
+# reads this catalog at runtime; letting an old BIN slip through makes its
+# displayed version and update decision actively misleading.
+python3 ../tools/update_firmware_catalog.py --check \
+    --firmware AppCatalog/current-firmware.bin \
+    --catalog AppCatalog/catalog.json
 
 TEAM="${DEVELOPMENT_TEAM:-}"
 if [[ -z "$TEAM" ]]; then
@@ -41,12 +51,14 @@ python3 ../tools/gen_ios_project.py
 echo "=== 编译 + 签名 ==="
 xcodebuild -project "${SCHEME}.xcodeproj" -scheme "$SCHEME" \
     -configuration Debug -destination "id=${DEVICE}" \
-    DEVELOPMENT_TEAM="$TEAM" -allowProvisioningUpdates build \
+    DEVELOPMENT_TEAM="$TEAM" PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+    FOLO_BUNDLE_CONFIG="$FOLO_BUNDLE_CONFIG" \
+    -allowProvisioningUpdates build \
     | grep -E "Signing Identity|BUILD SUCCEEDED|BUILD FAILED|error:"
 
 APP=$(xcodebuild -project "${SCHEME}.xcodeproj" -scheme "$SCHEME" \
       -configuration Debug -destination "id=${DEVICE}" \
-      DEVELOPMENT_TEAM="$TEAM" \
+      DEVELOPMENT_TEAM="$TEAM" PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
       -showBuildSettings 2>/dev/null \
       | awk -F' = ' '/ BUILT_PRODUCTS_DIR /{d=$2} / FULL_PRODUCT_NAME /{n=$2} END{print d"/"n}')
 [[ -d "$APP" ]] || { echo "找不到构建产物: $APP" >&2; exit 1; }
@@ -54,8 +66,8 @@ APP=$(xcodebuild -project "${SCHEME}.xcodeproj" -scheme "$SCHEME" \
 # ⚠ 签名完整性自检 + 自愈。
 #
 # 打包应用配置那个脚本阶段没法声明输出(文件名是动态的),所以当
-# `~/.folotoy/*.json` 变了而源码没变时,Xcode 会重跑拷贝、却认为签名
-# 还是最新的 —— 产物里多了个没被签名覆盖的文件。表现是装机时报
+# `~/.folotoy/apps/*.json` 变了而源码没变时,Xcode 会重跑安全配置生成，
+# 却认为签名还是最新的 —— 产物内容变了但签名没更新。表现是装机时报
 # "invalid code signature",而错误信息跟真正的原因(动了配置)毫无关系。
 # 干净重建一次就好,这里自动做掉。
 if ! codesign --verify --deep "$APP" >/dev/null 2>&1; then
@@ -64,7 +76,9 @@ if ! codesign --verify --deep "$APP" >/dev/null 2>&1; then
         -configuration Debug -destination "id=${DEVICE}" clean >/dev/null 2>&1
     xcodebuild -project "${SCHEME}.xcodeproj" -scheme "$SCHEME" \
         -configuration Debug -destination "id=${DEVICE}" \
-        DEVELOPMENT_TEAM="$TEAM" -allowProvisioningUpdates build \
+        DEVELOPMENT_TEAM="$TEAM" PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+        FOLO_BUNDLE_CONFIG="$FOLO_BUNDLE_CONFIG" \
+        -allowProvisioningUpdates build \
         | grep -E "BUILD SUCCEEDED|BUILD FAILED|error:"
     codesign --verify --deep "$APP" || { echo "签名仍然无效,停。" >&2; exit 1; }
 fi

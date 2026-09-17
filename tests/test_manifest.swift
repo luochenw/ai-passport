@@ -114,6 +114,33 @@ struct TestManifest {
         // 多屏时标题要带页码,否则用户不知道还有别的页
         check(text.contains("1/2"), "多屏标题带页码")
 
+        let styledManifest = manifest("""
+        {
+          "id": "styled", "name": "分层", "capability": "fake",
+          "screens": [{ "title": "t", "rows": [
+            { "each": { "path": "menuRows", "body": [
+              { "text": "{{item}}", "style": "{{item.style}}" }
+            ] } }
+          ] }]
+        }
+        """)
+        cap.value = .object(["menuRows": .array([
+            .object(["text": .string("档口"), "style": .string("accent")]),
+            .object(["text": .string("  菜品"), "style": .string("body")]),
+        ])])
+        let styledText = ManifestApp(manifest: styledManifest, capability: cap).render().encode()
+        check(styledText.contains("L档口\nS0|accent\nL  菜品\n"),
+              "清单可从数组项读取文字和视觉层级")
+
+        let futureStyle = manifest("""
+        { "id": "future", "name": "未来", "capability": "fake",
+          "screens": [{ "title": "t", "rows": [
+            { "text": "仍可读", "style": "future-style" }
+          ] }] }
+        """)
+        check(!ManifestApp(manifest: futureStyle, capability: cap).render().encode().contains("\nS"),
+              "未知视觉层级降级为普通正文")
+
         // 下键翻页
         _ = app.handleKey(.down, .click)
         text = app.render().encode()
@@ -126,6 +153,25 @@ struct TestManifest {
         // 绑了动作的键交给能力,不当成翻页
         _ = app.handleKey(.ok, .click)
         check(cap.performed == ["refresh"], "绑定的键交给能力")
+
+        let mealManifestURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("mac-relay/AppManifests/meal.json")
+        let mealManifest = try! AppManifest.decode(Data(contentsOf: mealManifestURL))
+        check(mealManifest.keys["up"]?["click"] == "prevPage" &&
+              mealManifest.keys["down"]?["click"] == "nextPage",
+              "字节餐厅单击上下键翻菜单页")
+        check(mealManifest.keys["up"]?["hold"] == "prevDay" &&
+              mealManifest.keys["down"]?["hold"] == "nextDay",
+              "字节餐厅长按上下键切换日期")
+        check(mealManifest.keys["ok"]?["click"] == "togglePeriod",
+              "字节餐厅单击确定切换午晚餐")
+        let mealManifestText = try! String(contentsOf: mealManifestURL, encoding: .utf8)
+        check(mealManifestText.contains("{{weekday|default:字节餐厅}} {{dateLabel}} {{period}} {{pageStatus}}"),
+              "字节餐厅标题含星期、日期、餐次和紧凑页码")
+        check(mealManifestText.contains("!hasPeriodMenu") &&
+              mealManifestText.contains("本餐暂无菜单"),
+              "字节餐厅为空餐次提供明确空状态")
 
         // ---------- 覆盖层盖住一切 ----------
         cap.overlayValue = .loading("正在读取…")

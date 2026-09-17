@@ -1,7 +1,10 @@
 [
   {
-    "name": "最新固件",
-    "description": "当前可用的最新版本",
+    "name": "FoloToy AI Passport",
+    "description": "App 内置的当前固件",
+    "version": "0.1.0-dev+g243ca3a.dirty",
+    "size": 2475136,
+    "sha256": "63c15a87ae452727c5b1c8331cb4746179aa6abad53faafdc880a11bf1535739",
     "bin": "current-firmware.bin"
   }
 ]

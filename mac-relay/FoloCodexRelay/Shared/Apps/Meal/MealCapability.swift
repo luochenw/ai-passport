@@ -13,13 +13,14 @@ final class MealCapability: ObservableObject, AppCapability {
     static let id = "meal"
     /// 只留给 `.notInstalled` 那一屏的标题用 —— 名字、说明、图标现在都在
     /// 清单里,这里不再重复一份(重复的那份迟早跟清单对不上)。
-    let name = "吃饭"
+    let name = "字节餐厅"
 
     var onChange: (() -> Void)?
     /// 饭点提醒走 cmd.notify,跟屏幕是两条路。由解释器注入。
     var notify: ((String) -> Void)?
 
     @Published var serverAddress: String
+    @Published var sharedToken: String
     @Published private(set) var snapshot: MealSnapshot
 
     private let client: MealClient
@@ -30,6 +31,7 @@ final class MealCapability: ObservableObject, AppCapability {
     private var deviceSnapshot: MealSnapshot
     private var selectedDate = ""
     private var dinner = false
+    private var menuPage = 0
 
     /// ⚠ `installedHere` 是**这一台**装没装,跟 `snapshot.installed`
     /// ("还有没有任何一台装着",它决定那条全局 WebSocket 要不要活)是两回事。
@@ -45,7 +47,9 @@ final class MealCapability: ObservableObject, AppCapability {
         self.deviceKey = deviceKey
         self.notifications = notifications
         let initialSnapshot = client.currentSnapshot()
-        serverAddress = client.currentConfiguration()
+        let config = client.currentConfiguration()
+        serverAddress = config.server
+        sharedToken = config.token
         snapshot = initialSnapshot
         deviceSnapshot = initialSnapshot
 
@@ -56,6 +60,7 @@ final class MealCapability: ObservableObject, AppCapability {
             if self.selectedDate.isEmpty ||
                 !MealDateNavigation.dates(in: value.weeks).contains(self.selectedDate) {
                 self.selectedDate = Self.defaultDay(in: value.weeks)?.date ?? ""
+                self.menuPage = 0
             }
             self.lock.unlock()
             self.snapshot = value
@@ -84,21 +89,38 @@ final class MealCapability: ObservableObject, AppCapability {
         if selectedDate.isEmpty {
             selectedDate = Self.defaultDay(in: deviceSnapshot.weeks)?.date ?? ""
         }
+        menuPage = 0
         lock.unlock()
         onChange?()
     }
 
-    /// 清单里 `up/down.click` 换天、`ok.click` 切午/晚餐。
+    /// 清单里单击上下键翻当前菜单，长按上下键换天，单击确定切午/晚餐。
     @discardableResult
     func perform(_ action: String) -> Bool {
         switch action {
+        case "prevPage": return shiftPage(-1)
+        case "nextPage": return shiftPage(1)
         case "prevDay": return shiftDay(-1)
         case "nextDay": return shiftDay(1)
         case "togglePeriod":
-            lock.lock(); dinner.toggle(); lock.unlock()
+            lock.lock(); dinner.toggle(); menuPage = 0; lock.unlock()
             return true
         default: return false
         }
+    }
+
+    private func shiftPage(_ delta: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard delta != 0,
+              let week = deviceSnapshot.weeks.first,
+              let day = week.days.first(where: { $0.date == selectedDate }) else {
+            return true
+        }
+        let period = dinner ? day.dinner : day.lunch
+        let pages = Self.menuPages(for: period)
+        menuPage = max(0, min(menuPage + (delta < 0 ? -1 : 1), pages.count - 1))
+        return true
     }
 
     private func shiftDay(_ delta: Int) -> Bool {
@@ -108,6 +130,7 @@ final class MealCapability: ObservableObject, AppCapability {
             in: deviceSnapshot.weeks, current: selectedDate, delta: delta
         ) else { return false }
         selectedDate = next
+        menuPage = 0
         return true
     }
 
@@ -121,6 +144,7 @@ final class MealCapability: ObservableObject, AppCapability {
         let value = deviceSnapshot
         let date = selectedDate
         let showDinner = dinner
+        let selectedPage = menuPage
         let installedHereNow = installedHere
         lock.unlock()
 
@@ -131,6 +155,7 @@ final class MealCapability: ObservableObject, AppCapability {
             "multiDay": .bool(MealDateNavigation.dates(in: value.weeks).count > 1),
             "period": .string(showDinner ? "晚餐" : "午餐"),
             "date": .string(date),
+            "dateLabel": .string(MealDateNavigation.monthDay(for: date)),
         ]
 
         guard let week = value.weeks.first, !date.isEmpty else {
@@ -149,11 +174,22 @@ final class MealCapability: ObservableObject, AppCapability {
         root["weekday"] = .string(day.weekday)
 
         let p = showDinner ? day.dinner : day.lunch
-        root["floor"] = .string(p.recommendedFloor.isEmpty ? "暂无" : p.recommendedFloor)
-        root["recommendation"] = .array(
-            p.recommendation.isEmpty ? []
-                : DeviceText.wrap(p.recommendation, limit: 2).map { JSONValue.string($0) })
-        root["floors"] = .array(Self.floorSummary(p.outlets).map { JSONValue.string($0) })
+        root["hasPeriodMenu"] = .bool(MealMenuPagination.hasMenu(p))
+        let pages = Self.menuPages(for: p)
+        let page = max(0, min(selectedPage, pages.count - 1))
+        if page != selectedPage {
+            lock.lock()
+            if menuPage == selectedPage { menuPage = page }
+            lock.unlock()
+        }
+        root["menuRows"] = .array(pages[page].map { row in
+            .object([
+                "text": .string(row.text),
+                "style": .string(row.style.rawValue),
+            ])
+        })
+        root["pageStatus"] = .string(MealMenuPagination.status(
+            pageIndex: page, pageCount: pages.count))
         return .object(root)
     }
 
@@ -163,7 +199,7 @@ final class MealCapability: ObservableObject, AppCapability {
         return here ? nil : .notInstalled(name)
     }
     func saveAndReconnect() {
-        client.configure(server: serverAddress)
+        client.configure(server: serverAddress, token: sharedToken)
     }
 
     func reconnect() {
@@ -176,22 +212,11 @@ final class MealCapability: ObservableObject, AppCapability {
         return week.days.first(where: { $0.date == today }) ?? week.days.first
     }
 
-    private static func floorSummary(_ outlets: [MealOutlet]) -> [String] {
-        var dishesByFloor: [String: [String]] = [:]
-        for outlet in outlets {
-            var dishes = dishesByFloor[outlet.floor] ?? []
-            for dish in outlet.dishes where !dishes.contains(dish) {
-                dishes.append(dish)
-            }
-            dishesByFloor[outlet.floor] = dishes
-        }
-        return dishesByFloor.keys.sorted {
-            Int(String($0.filter(\.isNumber))) ?? 999 <
-                Int(String($1.filter(\.isNumber))) ?? 999
-        }.map { floor in
-            let dishes = dishesByFloor[floor] ?? []
-            return dishes.isEmpty ? floor : "\(floor) \(dishes.prefix(2).joined(separator: "/"))"
-        }
+    private static func menuPages(for period: MealPeriod) -> [[MealMenuRow]] {
+        MealMenuPagination.pages(for: period, wrapping: { text, reservedWidth in
+            DeviceText.wrap(text, limit: Int.max,
+                            widthBudget: DeviceText.rowBudget - reservedWidth)
+        })
     }
 
     private static let dateFormatter: DateFormatter = {
@@ -210,7 +235,7 @@ struct MealSettingsView: View {
     var body: some View {
         Form {
             Section("状态") {
-                LabeledContent("服务", value: model.snapshot.connected ? "已连接" : "未连接")
+                LabeledContent("服务", value: model.snapshot.connected ? "已连接" : model.snapshot.status)
                 LabeledContent("菜单记录", value: "\(model.snapshot.weeks.count) 周")
                 if let latest = model.snapshot.weeks.first {
                     LabeledContent("最新一周", value: latest.weekOf)
@@ -218,18 +243,24 @@ struct MealSettingsView: View {
                 }
             }
 
-            Section("本地服务") {
-                TextField("WebSocket 地址", text: $model.serverAddress)
+            Section("餐厅服务") {
+                TextField("服务器地址", text: $model.serverAddress,
+                          prompt: Text("服务器IP:8788"))
                     #if !os(macOS)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     #endif
+                SecureField("共享口令", text: $model.sharedToken,
+                            prompt: Text("留空表示服务端未设口令"))
                 HStack {
                     Button("重新连接") { model.reconnect() }
                     Spacer()
                     Button("保存并连接") { model.saveAndReconnect() }
                         .keyboardShortcut(.defaultAction)
                 }
+                Text("可填写“服务器IP:8788”。共享口令保存在系统钥匙串；字节餐厅与对讲机使用不同端口。公网 ws:// 为明文连接。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             if !model.snapshot.weeks.isEmpty {

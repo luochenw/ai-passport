@@ -47,31 +47,33 @@ struct RootView: View {
                 SessionView(session: session)
                     .id(session.deviceID)
             } else {
-                WaitingForDeviceView()
+                WaitingForDeviceView(model: core.devicesModel)
             }
         }
         .padding(.top, 6)
     }
 }
 
-/// 一台设备的三个页签。谈的全部是**这一台**。
+/// 一台设备的应用首页和设置。导航状态跟随这一台设备。
 private struct SessionView: View {
     let session: DeviceSession
+    @ObservedObject private var config: DeviceConfigModel
     /// 「应用」标签页的导航栈。每台各一份 —— 它是 `@State`,而外面套了
     /// `.id(deviceID)`,换设备时整棵子树重建,栈自然跟着归零。
     @State private var appSettingsPath = NavigationPath()
+    @State private var deviceSettingsPath: [DeviceSettingsRoute] = []
+    @State private var selectedTab = SessionTab.apps
+
+    private enum SessionTab: Hashable { case apps, settings }
+
+    init(session: DeviceSession) {
+        self.session = session
+        self.config = session.deviceConfigModel
+    }
 
     var body: some View {
-        // 三个一级页面放进一个标签窗口。应用自己的设置属于应用管理层级,
-        // 通过「应用」列表进入,不为每个应用占一个顶层标签。
-        //
-        // ⚠「应用」和「固件」是两件**完全不同**的事,标签上必须分清楚,早先
-        // 都叫"应用"是错的:
-        //   · 应用 = 跑在这台电脑上的远程应用,装/卸是即时的,设备只显示;
-        //   · 固件 = 整机镜像,通过蓝牙刷进设备的 appslot 分区,几分钟起步,
-        //            而且刷坏了要靠 bootloader 的防砖逻辑救回来。
-        // 两者放在同一个标签下,用户点"安装"时根本不知道自己触发的是哪一种。
-        TabView {
+        // 应用商店留在首页；固件升级、Wi-Fi 和蓝牙从设置进入。
+        TabView(selection: $selectedTab) {
             // ⚠ path 由外面拿着,入口用显式 Button 往里 append。
             //
             // 原来是在 List 行里放 NavigationLink(value:) + .buttonStyle(.plain)。
@@ -89,27 +91,75 @@ private struct SessionView: View {
                                 .navigationTitle("对讲机设置")
                         case .meal:
                             MealSettingsView(model: session.mealCapability)
-                                .navigationTitle("吃饭设置")
+                                .navigationTitle("字节餐厅设置")
                         }
                     }
             }
-            .tabItem { Label("应用", systemImage: "square.grid.2x2") }
-            DeviceConfigView(model: session.deviceConfigModel)
-                .tabItem { Label("配置", systemImage: "gearshape") }
-            AppStoreView(model: session.appStoreModel)
-                .tabItem { Label("固件", systemImage: "arrow.down.circle") }
+            .tabItem { Label("应用商店", systemImage: "square.grid.2x2") }
+            .tag(SessionTab.apps)
+            NavigationStack(path: $deviceSettingsPath) {
+                DeviceConfigView(model: config, onOpen: { deviceSettingsPath.append($0) })
+                    .navigationTitle("设置")
+                    .navigationDestination(for: DeviceSettingsRoute.self) { route in
+                        switch route {
+                        case .wifi:
+                            DeviceWifiSettingsView(model: config)
+                                .navigationTitle("Wi-Fi")
+                        case .bootChime:
+                            DeviceBootChimeSettingsView(model: config)
+                                .navigationTitle("开机音乐")
+                        case .bluetooth:
+                            DeviceBluetoothSettingsView(model: config)
+                                .navigationTitle("蓝牙")
+                        case .firmware:
+                            AppStoreView(model: session.appStoreModel)
+                                .navigationTitle("固件升级")
+                        }
+                    }
+            }
+            .tabItem { Label("设置", systemImage: "gearshape") }
+            .tag(SessionTab.settings)
+        }
+        .onReceive(config.$wifiSetupRequest) { request in
+            guard request != nil else { return }
+            selectedTab = .settings
+            if deviceSettingsPath != [.wifi] { deviceSettingsPath = [.wifi] }
         }
     }
 }
 
 /// 一台都还没连上。说清楚在等什么,不要给一个空白的标签窗口。
 private struct WaitingForDeviceView: View {
+    @ObservedObject var model: DevicesModel
+
+    private var headline: String {
+        guard let device = model.devices.first(where: { $0.displayed }) ?? model.devices.first else {
+            return "正在寻找 \(BLERelay.namePrefix) 设备…"
+        }
+        if device.connected { return device.authStatusText }
+        if device.authState == "denied" { return device.authStatusText }
+        return "已发现 \(device.alias.isEmpty ? device.name : device.alias)"
+    }
+
+    private var detail: String {
+        guard let device = model.devices.first(where: { $0.displayed }) ?? model.devices.first else {
+            return "陌生设备不会自动连接；发现后请在上方设备条中点选。"
+        }
+        if device.connected {
+            return "首次添加时，请同时确认系统蓝牙配对提示，并在 Passport 上核对后按确定。"
+        }
+        if device.authState == "denied" {
+            return "请检查 Passport 的「设置 → 蓝牙」，然后点上方设备手动重试。"
+        }
+        return "点上方设备开始连接。首次配对前，请先在 Passport 的「设置 → 蓝牙」中选择「开启配对发现」，然后按屏幕提示确认。"
+    }
+
     var body: some View {
         VStack(spacing: 10) {
             ProgressView()
-            Text("正在寻找 \(BLERelay.namePrefix) 设备…")
+            Text(headline)
                 .font(.callout)
-            Text("每台连上的设备都会有自己独立的一套应用和对讲身份。")
+            Text(detail)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

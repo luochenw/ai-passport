@@ -19,8 +19,9 @@ struct DevicesBar: View {
     @ObservedObject var model: DevicesModel
 
     var body: some View {
-        // 只有一台的时候不占地方 —— 单设备用户不该为多设备功能付出界面成本。
-        if model.devices.count > 1 {
+        // 单台且已经授权在线时仍不占地方；陌生/待确认/掉线设备必须可见，
+        // 否则“陌生设备不自动连接”会变成用户没有任何入口能主动连接。
+        if model.devices.count > 1 || model.devices.first.map({ !$0.authorized || !$0.connected }) == true {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
                     ForEach(model.devices) { d in
@@ -30,9 +31,9 @@ struct DevicesBar: View {
                                 // 正在看这一台。两件事必须分开画:三台都连着时
                                 // 三台都在工作,高亮的只是你正在看的那一台。
                                 Circle()
-                                    .fill(d.connected ? Color.green : Color.secondary.opacity(0.4))
+                                    .fill(statusColor(d))
                                     .frame(width: 6, height: 6)
-                                Text(shortName(d.name))
+                                Text(d.alias.isEmpty ? shortName(d.name) : d.alias)
                                     .lineLimit(1)
                                     .fontWeight(d.displayed ? .semibold : .regular)
                             }
@@ -54,20 +55,20 @@ struct DevicesBar: View {
                 .padding(.horizontal, 12)
                 .padding(.top, 6)
             }
-        } else if let only = model.devices.first, !only.connected {
-            // 只扫到一台、还没连上:说清楚在等什么,不要让人对着空白等。
-            Text("正在连接 \(shortName(only.name))…")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 12)
-                .padding(.top, 6)
         }
     }
 
+    private func statusColor(_ d: BLERelay.DiscoveredDevice) -> Color {
+        if d.authorized { return .green }
+        if d.connected { return .orange }
+        return .secondary.opacity(0.4)
+    }
+
     private func helpText(_ d: BLERelay.DiscoveredDevice) -> String {
-        if d.displayed { return "正在看这一台" }
-        if d.connected { return "已连接、正在独立运行。点击查看这一台" }
-        return "还没连上,正在重试"
+        if d.displayed && d.authorized { return "正在看这一台" }
+        if d.authorized { return "已认证、正在独立运行。点击查看这一台" }
+        if d.connected { return d.authStatusText }
+        return d.authState == "denied" ? "连接被拒绝；点击可手动重试" : "点击连接并认证"
     }
 
     /// "FoloPassport-2C44" 这一整串在按钮上太长,列表里每台都以 FoloPassport

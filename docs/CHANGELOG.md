@@ -6,6 +6,85 @@
 
 ## Unreleased
 
+- Added long-press uninstall for installed apps on the Passport home screen.
+  Uninstall requests are applied by the companion and synchronized back through
+  the manifest protocol. On iOS 17, trusted Passports now use CoreBluetooth
+  state restoration, remembered-peripheral retrieval, and system auto-reconnect
+  so a newly advertising device can reconnect while the app is backgrounded
+  when iOS permits it.
+
+- Updated the Passport status bar: connected Bluetooth now uses the official
+  Bluetooth blue, while connected Wi-Fi keeps the familiar Wi-Fi glyph in white.
+  Disconnected radios retain the theme's muted color.
+
+- Renamed the meal application to ByteDance Canteen while preserving existing
+  installations and custom icons. Meal and walkie settings now accept a bare
+  server IP/host with their default ports, distinguish a missing address from
+  an invalid one, and explain public `wss://` deployment. Canteen menus now use
+  accent-colored recommendation/outlet headings, indented dish rows, semantic
+  pagination with continuation headings, and compact date/page titles.
+- Enabled the user-selected IP-only `ws://` deployment mode on iOS. Service
+  tokens authenticate clients, while the settings UI continues to identify
+  `wss://` as the preferred Internet-facing transport.
+
+- Added on-device Settings with Wi-Fi first and Bluetooth directly below it, a startup-sound subpage with a
+  persistent switch (off by default) and independent volume, playback volume,
+  brightness, and firmware updates. The application store remains on the home screen. Wi-Fi shows
+  networks scanned by Passport; selecting a secured network opens password
+  entry in the iOS/macOS companion, which writes the credentials to the device.
+- Fixed the undersized housekeeping-task stack used by authentication timeout
+  handling, deferred its UI work until initialization finishes, and removed
+  manual light sleep while the BLE controller is advertising. Abnormal resets
+  skip the startup sound; normal playback now drains silent audio before
+  restoring the user's volume to prevent a loud final transient. Firmware
+  validation checks the compiled authentication-timeout stack budget.
+- Reduced Wi-Fi buffers and disabled throughput-oriented IRAM optimizations to
+  make room for Wi-Fi scanning alongside the resident BLE connection on ESP32-C3.
+  Network credentials remain managed by the device settings store.
+- Freed additional startup RAM for Wi-Fi by allocating the mono audio DMA shape
+  from boot and creating OTA/walkie queues and worker tasks only when those
+  features are first used. Wi-Fi scan failures now log their exact completion,
+  record-read or timeout cause; a scan timeout no longer disconnects an existing
+  Wi-Fi link.
+
+- Prevented legacy companion builds from repeatedly monopolizing Passport's
+  single BLE connection. Pre-authentication access to feature subscriptions now
+  shortens the HELLO grace period, and a legacy peer enters a bounded reconnect
+  cooldown with rate-limited probation so a current iPhone or Mac can acquire
+  the link. Authentication status formatting no longer exhausts the NimBLE host
+  task stack when such a connection is rejected.
+
+- Fixed unreadable companion labels on Passport by using display-safe names and
+  supported ASCII status separators. Forgetting a companion now also updates
+  the companion app's reconnect state, and an explicit pairing-discovery window
+  can repair an obsolete Apple BLE key once before falling back to actionable
+  system Bluetooth instructions.
+
+- Added trusted-companion pairing and connection ownership for iOS and macOS.
+  Unknown Passports are visible but require an explicit connection attempt and
+  physical confirmation on the device; trusted companions reconnect through an
+  encrypted BLE bond. iPhone and Mac companion names now have editable defaults
+  that update live on Passport. The Bluetooth page retains up to eight paired
+  devices and lets the user select, disconnect, or forget one while keeping one
+  active BLE link. The companion app also supports per-device aliases and several
+  independent Passport sessions without changing the BLE broadcast name.
+
+- Added a single-source firmware version pipeline based on the root `VERSION`
+  file. Development builds include the Git revision and dirty-state marker,
+  release builds carry the clean version, the device reports its running
+  version over BLE, and the iOS/macOS firmware panel distinguishes updates,
+  reinstalls, and downgrades. Firmware validation now emits both stable and
+  versioned full-image filenames and refreshes bundled size/SHA-256 metadata.
+
+- Fixed iOS BLE firmware updates stalling at the first write-without-response
+  window. The device now erases the OTA slot incrementally, the companion uses batches
+  that fit the device queue, and both sides clean up an abandoned transfer so
+  the device no longer remains stuck on an installation progress screen.
+
+- Fixed the iOS bundle omitting the built-in application manifests. The
+  Applications tab now keeps showing the bundled apps when the remote manifest
+  registry is unavailable.
+
 - The companion app now gives **every device a fully independent session**:
   its own app instances, browsing position, installed list, device settings
   (volume/brightness/status bar), and its own identity on the walkie server.

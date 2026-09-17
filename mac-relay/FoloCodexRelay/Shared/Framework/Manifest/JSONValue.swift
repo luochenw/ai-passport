@@ -87,7 +87,10 @@ extension JSONValue {
                 ? String(Int(n)) : String(n)
         case let .string(s): return s
         case let .array(a): return a.map(\.stringValue).joined(separator: " ")
-        case .object: return ""
+        // 带 `text` 的对象可直接作为模板值显示。这样数组项能在保留
+        // `item.style` 等元数据的同时继续使用 `{{item}}`；旧清单仍会把它
+        // 当普通字符串渲染，样式字段缺失时自然降级为正文色。
+        case let .object(o): return o["text"]?.stringValue ?? ""
         }
     }
 

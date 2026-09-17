@@ -24,6 +24,14 @@ On macOS, install the persistent local service with:
 The companion app connects to `ws://<server-address>:8787/v1/ws`. Health checks
 are available at `/healthz`.
 
+The settings field accepts `<host-or-ip>:8787` directly for local testing. For an Internet-facing
+deployment, use one long-running server process behind a domain with trusted
+TLS, expose only ports 80/443, and configure clients with
+`wss://talk.example.com/v1/ws`. Set `WALKIE_SHARED_TOKEN`; without it, anyone
+who knows the address and room can join, listen, and request the floor. All
+clients using the same room and token can talk to each other, with one active
+speaker at a time. Do not horizontally scale this stateful in-memory service.
+
 Meals are a **separate service** — see [`services/meal/`](../meal/README.md).
 
 Set `WALKIE_SHARED_TOKEN` to require the same pre-shared token from every

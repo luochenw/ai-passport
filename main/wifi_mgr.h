@@ -35,6 +35,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 typedef enum {
     WIFI_MGR_OFF = 0,      // 协议栈没起来(开机默认)
@@ -53,12 +54,34 @@ typedef struct {
     bool secure;        // 需要密码
 } wifi_mgr_ap_t;
 
-// 状态变化时被调一次。**运行在 Wi-Fi 事件任务里**,不要在里面做重活,
+typedef enum {
+    WIFI_MGR_SCAN_IDLE = 0,
+    WIFI_MGR_SCAN_SCANNING,  // 包含等当前连接尝试结束后再扫描
+    WIFI_MGR_SCAN_READY,     // 成功,scan_count 可以为 0
+    WIFI_MGR_SCAN_FAILED,
+} wifi_mgr_scan_status_t;
+
+// 一次复制一致的状态,无需访问驱动。SSID 保留原始 UTF-8 字节,协议层自行转义。
+typedef struct {
+    wifi_mgr_state_t state;
+    char ssid[WIFI_MGR_SSID_LEN];
+    char ip[16];
+    int rssi;
+    wifi_mgr_scan_status_t scan_status;
+    int scan_count;
+    char pending_ssid[WIFI_MGR_SSID_LEN];
+    bool pending_secure;  // 需要手机/电脑填写密码
+    uint32_t revision;
+    uint32_t scan_revision; // 每次扫描完成/失败递增,含 0 条和相同数量结果
+} wifi_mgr_snapshot_t;
+
+// 状态变化时被调一次。**运行在 Wi-Fi worker 里**,不要在里面做重活,
 // 也不要碰 LVGL(那要 LVGL 锁)。用途是把状态转发给配套 app。
 typedef void (*wifi_mgr_watch_fn)(void);
 
-// 注册回调。不会拉起协议栈。
+// app_main 中调用一次:创建串行 worker,不会拉起协议栈。
 void wifi_mgr_init(wifi_mgr_watch_fn on_change);
+void wifi_mgr_snapshot(wifi_mgr_snapshot_t *out);
 
 // ---- 查询:随时可调,协议栈没起来时返回 OFF / 空值 -------------------------
 wifi_mgr_state_t wifi_mgr_state(void);
@@ -73,16 +96,25 @@ const char      *wifi_mgr_ip(void);     // 没连时返回 ""
 // —— 这些函数会被 BLE 的回调链调到,在那里面阻塞几秒会把整条蓝牙通道卡住。
 
 // 用给定凭据连接。ssid 为 NULL/空时用配置里存的(device_config_wifi_ssid())。
-// 返回 false 表示连发起都没成功(协议栈拉不起来,或者根本没有 SSID)。
+// 返回值只表示是否接受请求;初始化/连接失败通过 snapshot 报告。
+// 非空 ssid 只有与已保存 SSID 相同时才允许复用 NULL password。
 bool wifi_mgr_connect(const char *ssid, const char *password);
 
-// 断开,但协议栈留着(下次连不用重新拉起)。
+// 断开并停止射频,保留 netif/驱动单例(下次连可重用)。
 void wifi_mgr_disconnect(void);
 
 // 发起一次扫描。结果就绪后会触发状态回调,再用下面两个函数取。
 bool wifi_mgr_scan_start(void);
 bool wifi_mgr_scan_busy(void);
+wifi_mgr_scan_status_t wifi_mgr_scan_status(void);
 
 // 扫描结果。返回条数;entry 可以为 NULL 只问条数。
 int  wifi_mgr_scan_count(void);
 bool wifi_mgr_scan_entry(int index, wifi_mgr_ap_t *out);
+
+// 设备页选网络:开放网络直接连;同 SSID 复用已保存密码;其余加密网络
+// 通过 pending_ssid/pending_secure 提示配套 app 输入密码并写入设备。
+// 只复制选项并投递,不在按键/LVGL 任务里读写 NVS 或调用网络 API。
+bool wifi_mgr_select_network(int index);
+// Use a displayed AP snapshot so a rescan cannot silently change the selected SSID.
+bool wifi_mgr_select_ap(const wifi_mgr_ap_t *ap);

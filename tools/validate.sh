@@ -13,6 +13,9 @@ run_static_checks() {
     local test_dir
 
     python3 tools/check_repo.py
+    python3 tests/test_ui_font.py
+    python3 tests/test_housekeeping_stack.py
+    python3 tests/test_boot_chime.py
 
     # 应用目录必须和清单同步。对不上的后果是**静默**的:伴侣端拉下清单、
     # 摘要不符、全部丢弃、退回内置版本 —— 屏幕上一切正常,只是"从网上更新
@@ -35,9 +38,37 @@ run_static_checks() {
     "${test_dir}/test_ui_pixel_math"
 
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_remote_row_style.c main/remote_row_style.c \
+        -o "${test_dir}/test_remote_row_style"
+    "${test_dir}/test_remote_row_style"
+
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_ui_text_sanitize.c main/ui_text_sanitize.c \
+        -o "${test_dir}/test_ui_text_sanitize"
+    "${test_dir}/test_ui_text_sanitize"
+
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/test_walkie_codec.c main/walkie_codec.c \
         -o "${test_dir}/test_walkie_codec"
     "${test_dir}/test_walkie_codec"
+
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_device_trust_index.c main/device_trust_index.c \
+        -o "${test_dir}/test_device_trust_index"
+    "${test_dir}/test_device_trust_index"
+
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_device_trust_protocol.c main/device_trust_protocol.c \
+        -o "${test_dir}/test_device_trust_protocol"
+    "${test_dir}/test_device_trust_protocol"
+
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_wifi_mgr_model.c -o "${test_dir}/test_wifi_mgr_model"
+    "${test_dir}/test_wifi_mgr_model"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
+        -Itests/wifi_mgr_stubs -Imain tests/test_wifi_mgr.c \
+        -o "${test_dir}/test_wifi_mgr"
+    "${test_dir}/test_wifi_mgr"
 
     if command -v go >/dev/null 2>&1; then
         (cd services && go test ./...)
@@ -99,7 +130,8 @@ run_static_checks() {
         swiftc -o "${test_dir}/test_walkie_client" \
             tests/test_walkie_client.swift \
             mac-relay/FoloCodexRelay/Shared/Apps/Walkie/WalkieClient.swift \
-            mac-relay/FoloCodexRelay/Shared/Apps/Walkie/WalkieProtocol.swift
+            mac-relay/FoloCodexRelay/Shared/Apps/Walkie/WalkieProtocol.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/AppConfigStore.swift
         HOME="${test_dir}" "${test_dir}/test_walkie_client"
 
         # 清单解释器:模板求值、条件、遍历、翻页、坏清单的容错。
@@ -137,17 +169,35 @@ run_static_checks() {
             mac-relay/FoloCodexRelay/Shared/Apps/Meal/MealProtocol.swift \
             mac-relay/FoloCodexRelay/Shared/Framework/AppConfigStore.swift
         HOME="${test_dir}" "${test_dir}/test_meal_client"
+
+        swiftc -o "${test_dir}/test_firmware_version" \
+            tests/test_firmware_version.swift \
+            mac-relay/FoloCodexRelay/Shared/Apps/Firmware/FirmwareVersion.swift
+        "${test_dir}/test_firmware_version"
+
+        swiftc -o "${test_dir}/test_ble_reconnect_policy" \
+            tests/test_ble_reconnect_policy.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/BLERelayReconnectPolicy.swift
+        "${test_dir}/test_ble_reconnect_policy"
+
+        swiftc -o "${test_dir}/test_device_config" \
+            tests/test_device_config.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/DeviceConfig.swift \
+            mac-relay/FoloCodexRelay/Shared/Framework/BLERelayReconnectPolicy.swift
+        "${test_dir}/test_device_config"
     else
         echo "跳过 Swift 主机测试:非 macOS(SwiftUI 只在 Apple 平台上有)"
     fi
 
     python3 tests/test_verify_firmware.py
+    python3 tests/test_firmware_catalog.py
+    python3 tests/test_bundle_app_configs.py
     rm -rf "${test_dir}"
     echo "Host tests: PASS"
 }
 
 run_firmware_checks() (
-    local validation_build_dir
+    local validation_build_dir firmware_version versioned_full_name
 
     if ! command -v idf.py >/dev/null 2>&1; then
         echo "ERROR: idf.py is not available; activate ESP-IDF 5.5.3 first." >&2
@@ -160,19 +210,41 @@ run_firmware_checks() (
     SDKCONFIG_DEFAULTS="${repo_root}/sdkconfig.defaults" \
         idf.py -B "${validation_build_dir}" \
         -D "SDKCONFIG=${validation_build_dir}/sdkconfig" build
+    python3 tools/check_housekeeping_stack.py \
+        "${validation_build_dir}/FoloToy-AI-Passport.elf"
     idf.py -B "${validation_build_dir}" size
     idf.py -B "${validation_build_dir}" merge-bin \
         -o "${validation_build_dir}/FoloToy-AI-Passport-full.bin"
     python3 tools/verify_firmware.py "${validation_build_dir}"
+    firmware_version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["project_version"])' \
+        "${validation_build_dir}/project_description.json")"
+    case "${firmware_version}" in
+        ""|*[!0-9A-Za-z.+-]*)
+            echo "ERROR: unsafe firmware version from ESP-IDF: ${firmware_version}" >&2
+            return 1
+            ;;
+    esac
+    versioned_full_name="FoloToy-AI-Passport-v${firmware_version}-full.bin"
     mkdir -p "${repo_root}/build"
+    install -m 0644 \
+        "${validation_build_dir}/FoloToy-AI-Passport.elf" \
+        "${repo_root}/build/FoloToy-AI-Passport-verified.elf"
     install -m 0644 \
         "${validation_build_dir}/FoloToy-AI-Passport-full.bin" \
         "${repo_root}/build/FoloToy-AI-Passport-full.bin"
+    install -m 0644 \
+        "${validation_build_dir}/FoloToy-AI-Passport-full.bin" \
+        "${repo_root}/build/${versioned_full_name}"
     mkdir -p "${repo_root}/mac-relay/AppCatalog"
     install -m 0644 \
         "${validation_build_dir}/FoloToy-AI-Passport.bin" \
         "${repo_root}/mac-relay/AppCatalog/current-firmware.bin"
-    echo "Firmware build: PASS"
+    python3 tools/update_firmware_catalog.py \
+        --firmware "${repo_root}/mac-relay/AppCatalog/current-firmware.bin" \
+        --catalog "${repo_root}/mac-relay/AppCatalog/catalog.json" \
+        --version "${firmware_version}"
+    echo "Firmware build: PASS (${firmware_version})"
+    echo "Versioned image: build/${versioned_full_name}"
 )
 
 cd "${repo_root}"

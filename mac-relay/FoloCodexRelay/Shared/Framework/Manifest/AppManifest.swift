@@ -21,8 +21,8 @@ import Foundation
 
 /// 一行的声明。
 indirect enum ManifestRow {
-    /// 一行文字。内容是模板。
-    case text(String)
+    /// 一行文字。内容和可选视觉层级都是模板。未知视觉层级降级为普通正文。
+    case text(String, style: String?)
     /// 进度条。`label` 是模板,`value` 是取百分比的路径。
     case bar(label: String, value: String)
     /// 空行。
@@ -82,13 +82,13 @@ struct AppManifest {
 extension ManifestRow: Decodable {
     private enum Keys: String, CodingKey {
         case text, bar, spacer, when, each, list
-        case label, value, cond, then, `else`, path, limit, body, selected, empty
+        case label, value, style, cond, then, `else`, path, limit, body, selected, empty
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
         if let t = try c.decodeIfPresent(String.self, forKey: .text) {
-            self = .text(t); return
+            self = .text(t, style: try c.decodeIfPresent(String.self, forKey: .style)); return
         }
         if c.contains(.spacer) {
             self = .spacer; return

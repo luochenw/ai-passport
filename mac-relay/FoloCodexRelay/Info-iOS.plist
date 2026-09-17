@@ -7,7 +7,7 @@
     <key>CFBundleDisplayName</key>
     <string>FoloToy</string>
     <key>CFBundleIdentifier</key>
-    <string>com.folotoy.codexrelay</string>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
     <key>CFBundleExecutable</key>
     <string>FoloCodexRelay</string>
     <key>CFBundlePackageType</key>
@@ -68,7 +68,11 @@
          SHA-256 指纹。 -->
     <key>NSAppTransportSecurity</key>
     <dict>
-        <key>NSAllowsLocalNetworking</key>
+        <!-- The user-selected IP-only deployment uses ws:// with token
+             authentication. This is intentionally broad because ATS exception
+             domains do not support a changing numeric IP. Prefer wss:// when
+             a domain or pinned certificate becomes available. -->
+        <key>NSAllowsArbitraryLoads</key>
         <true/>
     </dict>
 </dict>

@@ -39,6 +39,15 @@ void demo_battery_key(bsp_btn_t btn, bsp_btn_ev_t ev);
 void demo_wifi_enter(void);    void demo_wifi_exit(void);
 void demo_wifi_key(bsp_btn_t btn, bsp_btn_ev_t ev);
 
+typedef enum {
+    SETTINGS_DEST_NONE, SETTINGS_DEST_WIFI, SETTINGS_DEST_FIRMWARE, SETTINGS_DEST_CONNECTIONS
+} settings_destination_t;
+void demo_settings_enter(void);
+void demo_settings_exit(void);
+void demo_settings_key(bsp_btn_t btn, bsp_btn_ev_t ev);
+bool demo_settings_back(void);
+settings_destination_t demo_settings_take_destination(void);
+
 void demo_ble_enter(void);     void demo_ble_exit(void);
 void demo_ble_key(bsp_btn_t btn, bsp_btn_ev_t ev);
 

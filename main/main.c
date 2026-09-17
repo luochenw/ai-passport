@@ -1,9 +1,9 @@
 // main/main.c —— FoloToy AI Passport BSP 驱动参考示例:初始化 + 菜单 + 按键分发。
 //
 // 菜单结构(三层):
-//   顶层菜单  —— "Codex"(常驻蓝牙中继展示) / "设置"(下面这些硬件 bring-up 演示)
-//   设置子菜单 —— 显示/按键/音频/电量/Wi-Fi/蓝牙/低功耗/看板,原来的那一套
-//   具体页面  —— Codex 页或某个设置子项
+//   顶层菜单  —— 已安装应用 / 应用商店 / 设置
+//   设置子菜单 —— Wi-Fi / 蓝牙 / 开机音乐 / 音量 / 亮度 / 固件升级
+//   开机音乐子页 —— 开关 / 独立音量
 //
 // 按键语义(全局统一):
 //   上/下 短按   菜单/子菜单中=移动选中项;具体页面中=该页自定义
@@ -20,12 +20,15 @@
 #include "ble_hub.h"
 #include "remote_ui.h"
 #include "device_config.h"
+#include "device_trust.h"
+#include "device_trust_protocol.h"
 #include "wifi_mgr.h"
 #include "walkie_audio.h"
 #include "demo.h"
 #include "ui_pixel.h"
 #include "ui_statusbar.h"
 #include "ui_notify.h"
+#include "ui_text_sanitize.h"
 #include "lvgl.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_log.h"
@@ -38,15 +41,20 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
 
 static const char *TAG = "main";
+static atomic_bool s_system_ready;
+#define HOUSEKEEPING_STACK_BYTES 8192
 
 static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user);
 static void top_menu_refresh(void);
+static void enter_top_menu(void);
+static void trust_ui_check(void);
 static void apply_time_sync(const char *value);
 static void on_walkie_activity(bool receiving);
 // 通知到达时点亮屏幕。跟 wake_screen() 的区别:**不**置 s_wake_swallow ——
@@ -75,9 +83,9 @@ static void wake_screen_for_notify(void);
 // ⚠ 这个函数会在 **Wi-Fi 事件任务**里被调到,那个任务的栈只有两千多字节。
 // 所以不要在这里开大数组 —— 扫描结果是一行一行发的,每次只占一个小缓冲区,
 // 哪怕扫到二十个 AP 也不会把栈撑爆。
-static const char *wifi_state_name(void)
+static const char *wifi_state_name(wifi_mgr_state_t state)
 {
-    switch (wifi_mgr_state()) {
+    switch (state) {
     case WIFI_MGR_IDLE:       return "idle";
     case WIFI_MGR_CONNECTING: return "connecting";
     case WIFI_MGR_CONNECTED:  return "connected";
@@ -99,43 +107,58 @@ static void sanitize_ssid(const char *in, char *out, size_t n)
     out[i] = '\0';
 }
 
-// 扫描结果由 config_watch_task 择机发送,不在这里发。见 report_wifi_scan()。
-static volatile bool s_scan_report_pending;
+// Worker callbacks only signal. Formatting and BLE retries run on cfg_watch.
+static atomic_bool s_device_status_pending;
+static atomic_bool s_scan_snapshot_requested;
+static bool s_scan_report_pending;
+static uint32_t s_reported_scan_revision;
 
 static void report_device_status(void)
 {
+    atomic_store(&s_device_status_pending, true);
+}
+
+static void report_status_on_subscribe(void)
+{
+    atomic_store(&s_scan_snapshot_requested, true);
+    report_device_status();
+}
+
+static void send_device_status(void)
+{
     if (!device_config_status_ready()) return;
-
-    char safe[WIFI_MGR_SSID_LEN];
-    sanitize_ssid(wifi_mgr_ssid(), safe, sizeof(safe));
-
-    char line[192];
+    wifi_mgr_snapshot_t snapshot;
+    wifi_mgr_snapshot(&snapshot);
+    char ssid[WIFI_MGR_SSID_LEN], selected[WIFI_MGR_SSID_LEN];
+    sanitize_ssid(snapshot.ssid, ssid, sizeof(ssid));
+    sanitize_ssid(snapshot.pending_ssid, selected, sizeof(selected));
+    const char *scan_status = snapshot.scan_status == WIFI_MGR_SCAN_SCANNING ? "scanning" :
+                              snapshot.scan_status == WIFI_MGR_SCAN_READY ? "ready" :
+                              snapshot.scan_status == WIFI_MGR_SCAN_FAILED ? "failed" : "idle";
+    char line[352];
     snprintf(line, sizeof(line),
-             "wifi.state=%s\nwifi.ssid=%s\nwifi.ip=%s\nwifi.rssi=%d\nwifi.scanning=%d\n",
-             wifi_state_name(), safe, wifi_mgr_ip(), wifi_mgr_rssi(),
-             wifi_mgr_scan_busy() ? 1 : 0);
-    device_config_report(line);
-
-    // 扫描结果不在这里发。
-    //
-    // ⚠ 这个函数会从 **Wi-Fi 事件任务**和 **NimBLE 主机任务**(订阅回调)两个
-    // 上下文里被调到,而扫描结果是二十来行、几百字节。实测过一行一个 notify
-    // 连着发的下场:NimBLE 的 mbuf 池被打空,后面五六行全部 rc=6
-    // (BLE_HS_ENOMEM)发不出去 —— 而且是静默丢的,对端只会看到一份缺了几个
-    // 网络的列表。
-    //
-    // mbuf 要等已排队的包真的发出去才会回收,也就是说必须**等**。但在 NimBLE
-    // 主机任务里等是最糟的选择:那个任务正是负责处理发送完成、回收 mbuf 的,
-    // 睡在里面只会让池子更空。所以交给 config_watch_task 去发 —— 它有自己的
-    // 任务,睡得起。
-    if (wifi_mgr_scan_count() > 0) s_scan_report_pending = true;
+             "wifi.state=%s\nwifi.ssid=%s\nwifi.ip=%s\nwifi.rssi=%d\n"
+             "wifi.scanning=%d\nwifi.scan.status=%s\nwifi.selected=%s\nwifi.password_required=%d\n",
+             wifi_state_name(snapshot.state), ssid, snapshot.ip, snapshot.rssi,
+             snapshot.scan_status == WIFI_MGR_SCAN_SCANNING, scan_status,
+             selected, snapshot.pending_secure ? 1 : 0);
+    if (!device_config_report(line)) atomic_store(&s_device_status_pending, true);
+    // Include empty results on reconnect and after every completed scan.
+    bool force_scan = atomic_exchange(&s_scan_snapshot_requested, false);
+    if (snapshot.scan_status == WIFI_MGR_SCAN_READY &&
+        (force_scan || snapshot.scan_revision != s_reported_scan_revision)) {
+        s_scan_report_pending = true;
+        s_reported_scan_revision = snapshot.scan_revision;
+    } else if (snapshot.scan_status == WIFI_MGR_SCAN_FAILED) {
+        s_scan_report_pending = false;
+    }
 }
 
 // 把扫描结果推给对端。**只能从普通任务里调**,不能从 NimBLE 主机任务调。
-static void report_wifi_scan(void)
+static bool report_wifi_scan(void)
 {
     int n = wifi_mgr_scan_count();
-    if (n <= 0 || !device_config_status_ready()) return;
+    if (!device_config_status_ready()) return false;
 
     // 攒够一批再发,而不是一行一个 notify。二十个网络原本要二十多次
     // notify,批完之后只要五六次 —— 光这一项就把 mbuf 的压力降下来了。
@@ -154,7 +177,7 @@ static void report_wifi_scan(void)
         ok = device_config_report("wifi.ap.begin=\n");
         if (!ok) vTaskDelay(pdMS_TO_TICKS(30));
     }
-    if (!ok) return;
+    if (!ok) return false;
 
     for (int i = 0; i <= n; i++) {
         char line[128];
@@ -167,6 +190,15 @@ static void report_wifi_scan(void)
             len = snprintf(line, sizeof(line), "wifi.ap=%s\t%d\t%d\n",
                            safe, ap.rssi, ap.secure ? 1 : 0);
         } else {
+            // Do not commit a list assembled across two scans. A fresh begin
+            // on the next attempt replaces the companion's partial list.
+            wifi_mgr_snapshot_t current;
+            wifi_mgr_snapshot(&current);
+            if (current.scan_revision != s_reported_scan_revision ||
+                current.scan_status == WIFI_MGR_SCAN_FAILED) {
+                report_device_status();
+                return false;
+            }
             // 最后一轮:补上 end 标记。有了 begin/end 这一对,对端才能判断
             // "这一批发完了没有" —— 否则列表少一项和还没发完长得一模一样。
             len = snprintf(line, sizeof(line), "wifi.ap.end=%d\n", n);
@@ -183,7 +215,7 @@ static void report_wifi_scan(void)
             used = 0;
             if (!ok) {
                 ESP_LOGW(TAG, "扫描结果推送中断(链路不通),已发 %d 项", i);
-                return;
+                return false;
             }
         }
         memcpy(batch + used, line, (size_t)len);
@@ -198,7 +230,14 @@ static void report_wifi_scan(void)
             if (!ok) vTaskDelay(pdMS_TO_TICKS(30));
         }
     }
-    ESP_LOGI(TAG, "已推送 %d 个扫描结果", n);
+    wifi_mgr_snapshot_t snapshot;
+    wifi_mgr_snapshot(&snapshot);
+    if (snapshot.scan_revision != s_reported_scan_revision) {
+        report_device_status();
+        return false;
+    }
+    if (ok) ESP_LOGI(TAG, "已推送 %d 个扫描结果", n);
+    return ok;
     #undef SCAN_REPORT_RETRY
 }
 
@@ -309,6 +348,7 @@ static void config_watch_task(void *arg)
     // Retry until the configured volume has actually been applied.
     bool audio_pending = true;
     for (;;) {
+        device_config_process_pending();
         uint32_t now = device_config_revision();
         if (now != seen) {
             seen = now;
@@ -316,6 +356,7 @@ static void config_watch_task(void *arg)
             // 状态栏的显示项(sb.items)和时间都可能刚被改过,让它立刻重画,
             // 而不是等下一个刷新周期 —— app 上勾掉一项,设备要当场有反应。
             ui_statusbar_notify_config_changed();
+            device_config_request_snapshot();
             if (audio_pending) {
                 ESP_LOGI(TAG, "配置已生效:亮度 %d,音量 %d 待音频空闲后应用",
                          device_config_brightness(), device_config_volume());
@@ -328,9 +369,9 @@ static void config_watch_task(void *arg)
         }
         // 扫描结果在这里发,不在产生它的那个上下文里发 —— 理由见
         // report_device_status() 里的说明(NimBLE 主机任务里不能睡等 mbuf)。
+        if (atomic_exchange(&s_device_status_pending, false)) send_device_status();
         if (s_scan_report_pending) {
-            s_scan_report_pending = false;
-            report_wifi_scan();
+            s_scan_report_pending = !report_wifi_scan();
         }
         vTaskDelay(pdMS_TO_TICKS(300));
     }
@@ -351,8 +392,14 @@ static void init_shared_hardware(void)
         ESP_LOGW(TAG, "电量计不可用,状态栏将不显示电量");
     }
     if (bsp_audio_init() == ESP_OK) {
-        // 音效用自己的小音量放,放完把音量恢复成用户配置的值。
-        boot_chime_play_async((uint8_t)device_config_volume());
+        esp_reset_reason_t reason = esp_reset_reason();
+        bool abnormal = reason == ESP_RST_PANIC || reason == ESP_RST_INT_WDT ||
+                        reason == ESP_RST_TASK_WDT || reason == ESP_RST_WDT ||
+                        reason == ESP_RST_BROWNOUT;
+        if (device_config_boot_chime_enabled() && !abnormal) {
+            boot_chime_play_async((uint8_t)device_config_volume(),
+                                  (uint8_t)device_config_boot_chime_volume());
+        }
     } else {
         ESP_LOGW(TAG, "音频初始化失败,跳过开机音效");
     }
@@ -372,11 +419,14 @@ typedef enum {
     VIEW_CODEX,         // Codex 页(启动器变体)
     VIEW_REMOTE,        // 远程界面:电脑推什么显示什么
     VIEW_APPSTORE,      // 固件升级页(整机固件 OTA,跟远程应用是两回事)
+    VIEW_CONNECTIONS,   // 可信伴侣、添加伴侣与连接交接
+    VIEW_SETTINGS,
+    VIEW_WIFI,
 } view_t;
 
 static view_t s_view = VIEW_TOP_MENU;
 
-// 首屏 = 已安装的应用 + 两个固定入口。
+// 首屏 = 已安装的应用 + 应用商店、设置。
 //
 // 应用列表不是写死的:配套 app 连上后会推一份"用户装了哪些应用"的清单过来
 // (见 remote_ui.h),设备缓存进 NVS。所以首屏是随安装状态变的 —— 在应用
@@ -395,13 +445,15 @@ static view_t s_view = VIEW_TOP_MENU;
 // 首屏的固定项。电量曾经也在这里,后来去掉了 —— 顶部状态栏已经一直显示着
 // 电量,再单开一页只是把同一个数字换个地方再写一遍。
 #define TOP_FIXED_STORE    0
-#define TOP_FIXED_FIRMWARE 1
+#define TOP_FIXED_SETTINGS 1
 #define TOP_FIXED_COUNT    2
-static const char *TOP_FIXED_NAMES[] = { "应用商店", "固件升级" };
-static const char *TOP_FIXED_HINTS[] = { "安装/管理应用", "更新设备固件" };
+static const char *TOP_FIXED_NAMES[] = { "应用商店", "设置" };
+static const char *TOP_FIXED_HINTS[] = { "安装/管理应用", "" };
 // 图标用 montserrat 里的 FontAwesome 那一段 —— 中文字库 lv_font_ui_cn_14 没有
 // 这段码位,拿它画图标只会出方框。
-static const char *TOP_FIXED_ICONS[] = { LV_SYMBOL_DOWNLOAD, LV_SYMBOL_REFRESH };
+static const char *TOP_FIXED_ICONS[] = {
+    LV_SYMBOL_DOWNLOAD, LV_SYMBOL_SETTINGS
+};
 
 // 首屏最多能画几行(应用 + 固定项)。
 #define TOP_MAX_ROWS (REMOTE_UI_MAX_APPS + TOP_FIXED_COUNT)
@@ -523,6 +575,177 @@ static lv_obj_t *s_top_rows[TOP_MAX_ROWS];
 static lv_obj_t *s_top_icons[TOP_MAX_ROWS];
 static int s_top_sel;
 
+// ---- 蓝牙 / 首次配对确认 -------------------------------------------------
+#define TRUST_UI_VISIBLE_ROWS 7
+#define TRUST_UI_ROW_HEIGHT   29
+#define TRUST_UI_ROW_STEP     32
+static lv_obj_t *s_trust_scr;
+static lv_obj_t *s_trust_cards[TRUST_UI_VISIBLE_ROWS];
+static lv_obj_t *s_trust_labels[TRUST_UI_VISIBLE_ROWS];
+static lv_obj_t *s_trust_hint;
+static int s_trust_sel;
+static lv_obj_t *s_pairing_overlay;
+static lv_obj_t *s_pairing_peer_label;
+static lv_obj_t *s_pairing_code_label;
+static lv_obj_t *s_pairing_hint_label;
+static uint32_t s_trust_ui_revision;
+
+static void trust_connections_refresh(void)
+{
+    device_trust_snapshot_t snapshot;
+    device_trust_snapshot(&snapshot);
+    int count = 2 + device_trust_count();
+    if (s_trust_sel >= count) s_trust_sel = count - 1;
+    if (s_trust_sel < 0) s_trust_sel = 0;
+    int first = device_trust_window_first(s_trust_sel, count,
+                                          TRUST_UI_VISIBLE_ROWS);
+
+    for (int row = 0; row < TRUST_UI_VISIBLE_ROWS; row++) {
+        int index = first + row;
+        if (index >= count) {
+            lv_obj_add_flag(s_trust_cards[row], LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        lv_obj_remove_flag(s_trust_cards[row], LV_OBJ_FLAG_HIDDEN);
+        if (index == 0) {
+            char safe_name[DEVICE_TRUST_NAME_MAX + 1];
+            ui_text_sanitize_copy(safe_name, sizeof(safe_name),
+                                  snapshot.companion_name);
+            lv_label_set_text_fmt(s_trust_labels[row], "当前: %s",
+                                  snapshot.authorized && safe_name[0]
+                                      ? safe_name : "未连接");
+        } else if (index == 1) {
+            if (snapshot.pairing_discovery_active) {
+                lv_label_set_text_fmt(s_trust_labels[row], "开启配对发现  %ds",
+                                      snapshot.pairing_seconds);
+            } else {
+                lv_label_set_text(s_trust_labels[row], "开启配对发现");
+            }
+        } else {
+            char id[DEVICE_TRUST_ID_MAX + 1];
+            char name[DEVICE_TRUST_NAME_MAX + 1];
+            char safe_name[DEVICE_TRUST_NAME_MAX + 1];
+            uint8_t platform = 0;
+            device_trust_companion(index - 2, id, sizeof(id), name, sizeof(name), &platform);
+            ui_text_sanitize_copy(safe_name, sizeof(safe_name), name[0] ? name : id);
+            bool current = snapshot.authorized && strcmp(id, snapshot.companion_id) == 0;
+            lv_label_set_text_fmt(s_trust_labels[row], "%s%s%s",
+                                  current ? "* " : "", safe_name[0] ? safe_name : "未命名",
+                                  platform == 1 ? " / iPhone" : platform == 2 ? " / Mac" : "");
+        }
+        ui_pixel_set_selected(s_trust_cards[row], index == s_trust_sel, true);
+    }
+    lv_label_set_text_fmt(s_trust_hint,
+                          "确定 连接/断开    %d/%d\n双击 忘记    长按 返回",
+                          s_trust_sel + 1, count);
+}
+
+static void enter_connections(void)
+{
+    s_view = VIEW_CONNECTIONS;
+    s_trust_scr = ui_pixel_screen_create("蓝牙");
+    for (int i = 0; i < TRUST_UI_VISIBLE_ROWS; i++) {
+        int y = 5 + i * TRUST_UI_ROW_STEP;
+        s_trust_cards[i] = ui_pixel_panel_create(
+            s_trust_scr, 10, y, 220, TRUST_UI_ROW_HEIGHT, UI_PAPER);
+        lv_obj_set_style_pad_all(s_trust_cards[i], 0, 0);
+        s_trust_labels[i] = lv_label_create(s_trust_cards[i]);
+        lv_obj_set_style_text_font(s_trust_labels[i], &lv_font_ui_cn_14, 0);
+        lv_obj_set_style_text_color(s_trust_labels[i], lv_color_hex(UI_INK), 0);
+        lv_obj_align(s_trust_labels[i], LV_ALIGN_LEFT_MID, 4, 0);
+        lv_label_set_long_mode(s_trust_labels[i], LV_LABEL_LONG_DOT);
+        lv_obj_set_size(s_trust_labels[i], 210, 27);
+    }
+    s_trust_hint = ui_pixel_label(s_trust_scr, "", &lv_font_ui_cn_14, UI_MUTED);
+    lv_obj_set_size(s_trust_hint, 224, 54);
+    lv_label_set_long_mode(s_trust_hint, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(s_trust_hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(s_trust_hint, LV_ALIGN_BOTTOM_MID, 0, -5);
+    trust_connections_refresh();
+    lv_screen_load(s_trust_scr);
+}
+
+// GAP/NimBLE callbacks never touch LVGL. The one-second housekeeping task
+// notices the plain-data revision and creates/removes this overlay under the
+// LVGL lock.
+static void trust_ui_check(void)
+{
+    device_trust_snapshot_t snapshot;
+    device_trust_snapshot(&snapshot);
+    bool changed = snapshot.revision != s_trust_ui_revision;
+    bool countdown = s_view == VIEW_CONNECTIONS && snapshot.pairing_discovery_active;
+    if (!changed && !countdown &&
+        (!!s_pairing_overlay == snapshot.confirmation_pending)) return;
+    if (!bsp_lvgl_lock(500)) return;
+    s_trust_ui_revision = snapshot.revision;
+
+    if (snapshot.confirmation_pending && !s_pairing_overlay) {
+        s_pairing_overlay = lv_obj_create(lv_layer_top());
+        lv_obj_set_size(s_pairing_overlay, 232, 286);
+        lv_obj_center(s_pairing_overlay);
+        lv_obj_set_style_bg_color(s_pairing_overlay, lv_color_hex(UI_PAPER), 0);
+        lv_obj_set_style_border_color(s_pairing_overlay, lv_color_hex(UI_ACCENT), 0);
+        lv_obj_set_style_border_width(s_pairing_overlay, 3, 0);
+
+        lv_obj_t *title = ui_pixel_label(s_pairing_overlay, "新的连接请求",
+                                         &lv_font_ui_cn_20, UI_INK);
+        lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 12);
+        s_pairing_peer_label = ui_pixel_label(s_pairing_overlay, "",
+                                               &lv_font_ui_cn_14, UI_INK_SOFT);
+        lv_obj_set_width(s_pairing_peer_label, 190);
+        lv_obj_set_style_text_align(s_pairing_peer_label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(s_pairing_peer_label, LV_ALIGN_TOP_MID, 0, 54);
+        s_pairing_code_label = lv_label_create(s_pairing_overlay);
+        lv_obj_set_style_text_font(s_pairing_code_label, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(s_pairing_code_label, lv_color_hex(UI_ACCENT), 0);
+        lv_obj_align(s_pairing_code_label, LV_ALIGN_CENTER, 0, -10);
+        s_pairing_hint_label = ui_pixel_label(
+            s_pairing_overlay, "核对两端数字\n确定 = 信任    上 = 拒绝",
+            &lv_font_ui_cn_14, UI_MUTED);
+        lv_obj_set_style_text_align(s_pairing_hint_label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(s_pairing_hint_label, LV_ALIGN_BOTTOM_MID, 0, -16);
+        wake_screen_for_notify();
+    }
+    if (snapshot.confirmation_pending && s_pairing_overlay) {
+        // The overlay can survive an A-disconnect/B-connect sequence between
+        // housekeeping ticks. Always refresh peer and code from the newest
+        // revision so the physical OK key can never appear to confirm A while
+        // the pending SMP transaction actually belongs to B.
+        const char *platform = snapshot.platform == 1 ? "iPhone / iPad" :
+                               snapshot.platform == 2 ? "Mac" : "未知平台";
+        char safe_peer_name[DEVICE_TRUST_NAME_MAX + 1];
+        ui_text_sanitize_copy(safe_peer_name, sizeof(safe_peer_name),
+                              snapshot.companion_name);
+        lv_label_set_text_fmt(s_pairing_peer_label,
+                              snapshot.confirmation_retrust
+                                  ? "重新信任\n%s\n%s / App %s"
+                                  : "%s\n%s / App %s",
+                              safe_peer_name[0] ? safe_peer_name : "未知伴侣",
+                              platform,
+                              snapshot.app_version[0] ? snapshot.app_version : "?");
+        if (snapshot.confirmation_retrust) {
+            lv_label_set_text(s_pairing_code_label, "TRUST");
+            lv_label_set_text(s_pairing_hint_label,
+                              "此伴侣之前已被忘记\n确定 = 重新信任    上 = 拒绝");
+        } else {
+            lv_label_set_text_fmt(s_pairing_code_label, "%06lu",
+                                  (unsigned long)snapshot.numeric_code);
+            lv_label_set_text(s_pairing_hint_label,
+                              "核对两端数字\n确定 = 信任    上 = 拒绝");
+        }
+    } else if (!snapshot.confirmation_pending && s_pairing_overlay) {
+        lv_obj_delete(s_pairing_overlay);
+        s_pairing_overlay = NULL;
+        s_pairing_peer_label = NULL;
+        s_pairing_code_label = NULL;
+        s_pairing_hint_label = NULL;
+    }
+    if ((changed || countdown) && s_view == VIEW_CONNECTIONS && s_trust_scr) {
+        trust_connections_refresh();
+    }
+    bsp_lvgl_unlock();
+}
+
 static esp_pm_lock_handle_t s_usb_pm_lock;
 static int64_t s_last_activity_us;
 
@@ -573,20 +796,12 @@ static void wake_screen_for_notify(void)
 }
 
 #define USB_KEEPALIVE_PERIOD_MS 1000
-#define IDLE_SLEEP_POLL_MS      1000   // 睡眠期间每次醒来检查按键的间隔
 
-// 菜单闲置超过 CONFIG_IDLE_SLEEP_TIMEOUT_SEC 秒就关背光进 light sleep,
-// 靠定时器每隔 IDLE_SLEEP_POLL_MS 醒一次探一下按键有没有被按下(电压不再是
-// 松开态 3300mV 附近就当作唤醒)。只在顶层菜单/设置子菜单纯浏览时触发——
-// Codex 页(常驻展示)和具体演示页内(哪怕闲置也可能在播音频/扫 Wi-Fi)都
-// 不会被这个逻辑打断。
-// ⚠ 必须先确认 USB 没插着:esp_light_sleep_start() 是直接调用,不会去看
-// s_usb_pm_lock 有没有被 usb_keepalive_task 持住,USB 插着时硬调一样会睡
-// 下去,正好撞上前面查到的 ESP32-C3 已知问题(light sleep 打断 USB-CDC)。
-// 这也刚好符合"断电后才自动休眠"这个本来的需求,USB 接着时不该触发。
+// Idle home/settings screens may turn off their backlight. Radio power is
+// managed by ESP-IDF's automatic PM, which observes the controller's locks.
 static void idle_sleep_check(void)
 {
-    bool browsing_menu = (s_view == VIEW_TOP_MENU);
+    bool browsing_menu = (s_view == VIEW_TOP_MENU || s_view == VIEW_SETTINGS);
     if (!browsing_menu || usb_serial_jtag_is_connected()) return;
 
     int64_t idle_us = esp_timer_get_time() - s_last_activity_us;
@@ -599,38 +814,9 @@ static void idle_sleep_check(void)
         ESP_LOGI(TAG, "闲置 %d 秒,息屏", CONFIG_IDLE_SLEEP_TIMEOUT_SEC);
     }
 
-    // ---- 第二步:只有在没有任何射频链路可丢的时候,才进一步 light sleep ----
-    //
-    // 这里调的是**手动** esp_light_sleep_start(),它不看任何 pm lock(那正是
-    // 它能在 USB 拔掉后真的睡下去的原因)。代价是会把常驻的 BLE 链路直接掐断
-    // —— 用户连着电脑停在首屏,蓝牙就断了,状态栏图标变灰、时钟停走、电脑
-    // 推屏全部丢失,而这些症状看起来完全像是状态栏或中继程序的 bug。
-    //
-    // Wi-Fi 同理:睡过去会错过 beacon/DTIM,醒来已经掉线,wifi_mgr 重试三次
-    // 之后停在 FAILED,用户什么都没做却看到"连接失败"。
-    //
-    // 所以有链路的时候就只息屏、不睡。省下的电本来也主要在背光上。
-    if (ble_hub_is_connected() || wifi_mgr_state() != WIFI_MGR_OFF) return;
-
-    // 状态栏的电量采样是一次 I2C 往返,而手动 light sleep 睡在 I2C 事务中间
-    // 会把外设状态丢掉(这个项目在 i2c_master_probe 上踩过一模一样的坑,见
-    // app_main 末尾那段注释)。拿不到采样锁就这一轮不睡,下一轮再说。
-    if (!ui_statusbar_pause_sampling()) return;
-
-    ESP_LOGI(TAG, "没有射频链路,进入 light sleep(定时轮询按键唤醒)");
-
-    while (bsp_button_read_mv() > 1900 &&           // 阈值同 BSP_BTN_MV_TABLE 的确定键上界
-           !usb_serial_jtag_is_connected() &&       // USB 中途插回来也退出
-           !ble_hub_is_connected()) {               // 电脑连上来了也退出
-        esp_sleep_enable_timer_wakeup((uint64_t)IDLE_SLEEP_POLL_MS * 1000);
-        esp_light_sleep_start();
-    }
-
-    ui_statusbar_resume_sampling();
-    // 从 light sleep 出来:按键 / USB / 电脑连上来,任一都算"有事发生"。
-    // 按键那条路径 on_key 也会调一次 wake_screen(),它是幂等的。
-    wake_screen();
-    ESP_LOGI(TAG, "退出休眠");
+    // A disconnected BLE controller is still advertising. Manual light sleep
+    // ignores its PM locks and can interrupt the controller or I2S DMA. Keep
+    // advertising available with the screen off; automatic PM honors locks.
 }
 
 // 配套 app 可以在任何时刻直接把固件推过来 —— 用户那一刻可能正停在任何界面
@@ -649,6 +835,9 @@ static void install_push_check(void)
     case VIEW_CODEX:         demo_codex_exit();      break;
     case VIEW_REMOTE:        demo_remote_exit();     break;
     case VIEW_TOP_MENU:      lv_obj_delete(s_top_scr);      s_top_scr = NULL;      break;
+    case VIEW_CONNECTIONS:   lv_obj_delete(s_trust_scr);    s_trust_scr = NULL;    break;
+    case VIEW_SETTINGS:      demo_settings_exit(); break;
+    case VIEW_WIFI:          demo_wifi_exit(); break;
     default: break;
     }
     s_view = VIEW_APPSTORE;
@@ -691,7 +880,7 @@ static void usb_keepalive_task(void *arg)
                 // 插上 USB 说明有人在跟这台设备打交道,点亮屏幕。
                 // wake_screen() 会恢复成用户配置的亮度;要是本来就亮着,
                 // 它什么都不做。
-                if (!wake_screen()) {
+                if (atomic_load(&s_system_ready) && !wake_screen()) {
                     bsp_display_backlight((uint8_t)device_config_brightness());
                 }
                 if (s_usb_pm_lock) esp_pm_lock_acquire(s_usb_pm_lock);
@@ -700,9 +889,22 @@ static void usb_keepalive_task(void *arg)
             }
             prev = now;
         }
-        install_push_check();
-        manifest_check();
-        idle_sleep_check();
+        // This task starts before peripherals, trust state and LVGL exist.
+        // Its early job is only the USB PM lock; no page may be touched yet.
+        if (atomic_load(&s_system_ready)) {
+            install_push_check();
+            manifest_check();
+            device_trust_tick();
+            trust_ui_check();
+            idle_sleep_check();
+            static unsigned health_ticks;
+            if (++health_ticks == 60) {
+                health_ticks = 0;
+                ESP_LOGI(TAG, "运行健康: housekeeping剩余栈=%u bytes, 最小空闲堆=%u bytes",
+                         (unsigned)uxTaskGetStackHighWaterMark(NULL),
+                         (unsigned)esp_get_minimum_free_heap_size());
+            }
+        }
         vTaskDelay(pdMS_TO_TICKS(USB_KEEPALIVE_PERIOD_MS));
     }
 }
@@ -768,7 +970,7 @@ static void enter_top_menu(void) {
         lv_obj_align(s_top_rows[i], LV_ALIGN_LEFT_MID, 24, 0);
     }
 
-    lv_obj_t *foot = ui_pixel_label(s_top_scr, "上/下选择  确定进入",
+    lv_obj_t *foot = ui_pixel_label(s_top_scr, "确定进入  APP长按卸载",
                                     &lv_font_ui_cn_14, UI_MUTED);
     lv_obj_align(foot, LV_ALIGN_BOTTOM_MID, 0, -8);
 
@@ -792,6 +994,7 @@ static void enter_top_menu(void) {
 
 static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
     (void)user;
+    if (!atomic_load(&s_system_ready)) return;
     s_last_activity_us = esp_timer_get_time();
 
     // 息屏状态下的第一下只负责点亮屏幕,不往下传。
@@ -812,6 +1015,19 @@ static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
         if (bsp_lvgl_lock(500)) {
             ui_notify_dismiss();
             bsp_lvgl_unlock();
+        }
+        return;
+    }
+
+    // Pairing confirmation is a modal physical-presence check. While it is
+    // visible no underlying app receives keys: OK accepts, UP rejects.
+    device_trust_snapshot_t trust_snapshot;
+    device_trust_snapshot(&trust_snapshot);
+    if (trust_snapshot.confirmation_pending) {
+        if (btn == BSP_BTN_OK && ev == BSP_BTN_CLICK) {
+            device_trust_confirm_pairing(true);
+        } else if (btn == BSP_BTN_UP && ev == BSP_BTN_CLICK) {
+            device_trust_confirm_pairing(false);
         }
         return;
     }
@@ -851,15 +1067,97 @@ static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
         break;
 
     case VIEW_APPSTORE:
-        if (btn == BSP_BTN_OK && ev == BSP_BTN_LONG) {     // 返回顶层菜单
+        if (btn == BSP_BTN_OK && ev == BSP_BTN_LONG) {
             demo_appstore_exit();
-            enter_top_menu();
+            s_view = VIEW_SETTINGS;
+            demo_settings_enter();
         } else {
             demo_appstore_key(btn, ev);
         }
         break;
 
+    case VIEW_CONNECTIONS:
+        if (btn == BSP_BTN_OK && ev == BSP_BTN_LONG) {
+            lv_obj_delete(s_trust_scr);
+            s_trust_scr = NULL;
+            s_view = VIEW_SETTINGS;
+            demo_settings_enter();
+            break;
+        }
+        if ((btn == BSP_BTN_UP || btn == BSP_BTN_DOWN) &&
+            (ev == BSP_BTN_PRESS || ev == BSP_BTN_HOLD)) {
+            int count = 2 + device_trust_count();
+            s_trust_sel = (btn == BSP_BTN_UP)
+                    ? (s_trust_sel + count - 1) % count
+                    : (s_trust_sel + 1) % count;
+            trust_connections_refresh();
+        }
+        if (btn == BSP_BTN_OK && ev == BSP_BTN_CLICK) {
+            if (s_trust_sel == 0) {
+                device_trust_disconnect_current();
+            } else if (s_trust_sel == 1) {
+                device_trust_open_pairing_window();
+            } else if (s_trust_sel >= 2) {
+                device_trust_snapshot_t snapshot;
+                char id[DEVICE_TRUST_ID_MAX + 1];
+                device_trust_snapshot(&snapshot);
+                if (device_trust_companion(s_trust_sel - 2, id, sizeof(id),
+                                           NULL, 0, NULL) &&
+                    (!snapshot.authorized ||
+                     strcmp(id, snapshot.companion_id) != 0)) {
+                    device_trust_handoff(s_trust_sel - 2);
+                }
+            }
+            trust_connections_refresh();
+        }
+        if (btn == BSP_BTN_OK && ev == BSP_BTN_DOUBLE && s_trust_sel >= 2) {
+            device_trust_forget(s_trust_sel - 2);
+            trust_connections_refresh();
+        }
+        break;
+
+    case VIEW_WIFI:
+        if (btn == BSP_BTN_OK && ev == BSP_BTN_LONG) {
+            demo_wifi_exit();
+            s_view = VIEW_SETTINGS;
+            demo_settings_enter();
+        } else {
+            demo_wifi_key(btn, ev);
+        }
+        break;
+
+    case VIEW_SETTINGS:
+        if (btn == BSP_BTN_OK && ev == BSP_BTN_LONG) {
+            if (demo_settings_back()) {
+                demo_settings_exit();
+                enter_top_menu();
+            }
+        } else {
+            demo_settings_key(btn, ev);
+            settings_destination_t destination = demo_settings_take_destination();
+            if (destination == SETTINGS_DEST_NONE) break;
+            demo_settings_exit();
+            if (destination == SETTINGS_DEST_WIFI) {
+                s_view = VIEW_WIFI;
+                demo_wifi_enter();
+            } else if (destination == SETTINGS_DEST_FIRMWARE) {
+                s_view = VIEW_APPSTORE;
+                demo_appstore_enter();
+            } else if (destination == SETTINGS_DEST_CONNECTIONS) {
+                enter_connections();
+            }
+        }
+        break;
+
     case VIEW_TOP_MENU:
+        // MANIFEST 在 NimBLE 任务里落地，而常规重绘由 housekeeping 每秒轮询。
+        // 因此装卸后的短窗口里，屏幕还可能画着旧行，但
+        // remote_ui_app_count() 已经是新值。若此时直接按确定，旧清单里的最后
+        // 一个 App 行会被当成固定的“应用商店”行，发送 0xFE；旧下标也可能在
+        // companion 的新清单里指向另一个应用。每个首屏按键先按最新清单重绘，
+        // 保证用户看到的行和下面解释下标时使用的是同一版列表。
+        top_menu_refresh();
+
         // 从 appslot(应用商店装的应用)启动时,顶层菜单已经是"最上面一层",
         // 再长按确定就是明确要退出这个应用、回到 factory 的启动器 —— 跟
         // VIEW_DEMO/VIEW_CODEX/VIEW_APPSTORE 里"长按确定退一层"是同一个
@@ -868,6 +1166,10 @@ static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
         if (btn == BSP_BTN_OK && ev == BSP_BTN_LONG) {
             if (s_running_from_appslot) {
                 return_to_launcher_from_appslot();
+            } else if (s_top_sel < remote_ui_app_count()) {
+                // 卸载请求交给 companion 处理。设备不先删本地缓存，等对端按
+                // MANIFEST 通道回推权威清单，断链时也不会出现两端各一份状态。
+                remote_ui_uninstall_app((uint8_t)s_top_sel);
             }
             break;
         }
@@ -895,9 +1197,9 @@ static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
                 remote_ui_open_app(REMOTE_UI_OPEN_STORE);
                 s_view = VIEW_REMOTE;
                 demo_remote_enter();
-            } else if (s_top_sel - apps == TOP_FIXED_FIRMWARE) {
-                s_view = VIEW_APPSTORE;
-                demo_appstore_enter();
+            } else if (s_top_sel - apps == TOP_FIXED_SETTINGS) {
+                s_view = VIEW_SETTINGS;
+                demo_settings_enter();
             }
         }
         break;
@@ -907,6 +1209,8 @@ static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
 
 void app_main(void) {
     ESP_LOGI(TAG, "FoloToy AI Passport BSP demo 启动");
+    ESP_LOGI(TAG, "复位原因: %d (power=1 software=3 panic=4 watchdog=5/6/7 brownout=9)",
+             (int)esp_reset_reason());
 
     const esp_partition_t *running = esp_ota_get_running_partition();
     s_running_from_appslot = running && strcmp(running->label, "appslot") == 0;
@@ -934,7 +1238,7 @@ void app_main(void) {
     // 尽早启动 usb_keepalive_task,让它赶在下面这堆外设初始化之前就把锁
     // 持住(USB 插着时)。之前这个任务是在整个 app_main 快结束时才创建的,
     // 等于初始化阶段完全没有这层保护,是导致下面这条 bug 的另一半原因。
-    if (xTaskCreate(usb_keepalive_task, "usb_keepalive", 2048,
+    if (xTaskCreate(usb_keepalive_task, "usb_keepalive", HOUSEKEEPING_STACK_BYTES,
                     NULL, 5, NULL) != pdPASS) {
         ESP_LOGE(TAG, "USB keepalive 任务创建失败");
     }
@@ -960,13 +1264,16 @@ void app_main(void) {
     // 配置要先读出来:init_shared_hardware() 里播开机音效,而音效放完需要把
     // 音量恢复成用户配置的值 —— 那个值得先在手上。
     device_config_init();
+    device_trust_init();
 
     init_shared_hardware();
 
     // 配置先于 BLE 起来:配置服务本身是 BLE 的一个 service,而且 Wi-Fi 凭据
     // 这类值在后面页面初始化时就可能被读到。
     apply_device_config();   // 把存下来的亮度落到硬件上(音量交给开机音效收尾)
-    xTaskCreate(config_watch_task, "cfg_watch", 3072, NULL, 3, NULL);
+    if (xTaskCreate(config_watch_task, "cfg_watch", 4096, NULL, 3, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "配置任务创建失败");
+    }
 
     // BLE 常驻:所有模块先把自己的 GATT service 注册进来,再一次性把协议栈
     // 拉起来。注册必须早于 ble_hub_init() —— NimBLE 在 ble_gatts_count_cfg()
@@ -975,13 +1282,14 @@ void app_main(void) {
     //
     // 常驻的意义:配套 app 在任何界面下都能连上并直接推送安装,不需要用户先
     // 在设备上戳进"应用商店"页面等着。
-    // Wi-Fi 归一个模块管(见 wifi_mgr.h)。这里只注册回调,不拉协议栈 ——
-    // 跑应用不需要 Wi-Fi,用户在 app 上点扫描/连接时才惰性起来。
+    // Wi-Fi 归一个模块管(见 wifi_mgr.h)。没有保存凭据时保持惰性；已有凭据
+    // 则在整机和 BLE 都就绪后自动恢复上次连接。
     wifi_mgr_init(report_device_status);
     device_config_set_cmd_handler(on_config_cmd);
-    device_config_set_status_hook(report_device_status);
+    device_config_set_status_hook(report_status_on_subscribe);
 
     device_config_ble_register();
+    device_trust_register();
     remote_ui_register();
     codex_ble_register();
     appstore_transfer_register();
@@ -998,6 +1306,16 @@ void app_main(void) {
         ui_notify_init();
         enter_top_menu();
         bsp_lvgl_unlock();
+        s_last_activity_us = esp_timer_get_time();
+        atomic_store(&s_system_ready, true);
+    }
+
+    if (device_config_has_wifi()) {
+        if (wifi_mgr_connect(NULL, NULL)) {
+            ESP_LOGI(TAG, "已提交上次保存的 Wi-Fi 自动连接");
+        } else {
+            ESP_LOGW(TAG, "无法提交 Wi-Fi 自动连接,可在设置中重新配置");
+        }
     }
 
     // ⚠ 到这里所有外设(I2C/显示/LVGL/按键/音频/电量计)都已初始化完毕,

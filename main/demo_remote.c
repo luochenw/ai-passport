@@ -112,6 +112,7 @@ static void render(void)
 
         if (scr.rows[i].kind == REMOTE_ROW_BAR) {
             lv_obj_remove_flag(s_labels[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_style_text_color(s_labels[i], lv_color_hex(UI_INK), 0);
             lv_label_set_text_fmt(s_labels[i], "%s %d%%",
                                   scr.rows[i].text, scr.rows[i].percent);
             lv_obj_set_pos(s_labels[i], ROW_X, y);
@@ -132,6 +133,14 @@ static void render(void)
             y += BAR_ROW_STEP;
         } else {
             lv_obj_remove_flag(s_labels[i], LV_OBJ_FLAG_HIDDEN);
+            uint32_t color = UI_INK;
+            if (scr.rows[i].style == REMOTE_ROW_STYLE_ACCENT) {
+                color = UI_ACCENT;
+            } else if (scr.rows[i].style == REMOTE_ROW_STYLE_SECONDARY) {
+                color = UI_INK_SOFT;
+            }
+            // 每次重绘都重设，避免上一屏同一下标的强调色污染这一屏正文。
+            lv_obj_set_style_text_color(s_labels[i], lv_color_hex(color), 0);
             lv_label_set_text(s_labels[i], scr.rows[i].text);
             lv_obj_set_pos(s_labels[i], ROW_X, y);
             y += ROW_STEP;

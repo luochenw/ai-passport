@@ -22,7 +22,7 @@ FoloToy AI Passport 是一个开放式可穿戴 AI 硬件，本仓库是这款 A
 | 输入 | `UP` / `DOWN` / `OK` 三键，共用 GPIO0 的 ADC 电阻分压 | `bsp_button_init()`、`bsp_button_read_mv()` | 回调运行在 button 组件任务中，不能阻塞；不能再创建第二个 ADC1 unit |
 | 音频 | ES8311，I2S0 全双工 PCM，可播放和麦克风录音 | `bsp_audio_*` | PCM 读写为阻塞调用，应放工作任务；格式切换必须保留 BSP 内的 close/open 流程 |
 | 电池 | CW2017 的 SOC 与电压读取 | `bsp_battery_*` | 是可缺省能力；读数精度取决于电芯与 profile，不能等同于已标定结果 |
-| Wi-Fi | 按需 2.4 GHz STA 扫描 demo | `main/demo_wifi.c` | 仅扫描；不连接、不存凭证、不验证天线/射频表现 |
+| Wi-Fi | 设置内的 2.4 GHz 扫描与网络选择 | `main/demo_wifi.c`、`main/wifi_mgr.c` | 开放或已保存网络可直接连接；新密码由伴侣端输入，射频表现仍需实机验证 |
 | Bluetooth LE | 按需以 `FoloPassport` 名义做不可连接的 NimBLE 广播 | `main/demo_ble.c` | ESP32-C3 不支持蓝牙经典；射频范围、共存与功耗需实测 |
 | 低功耗 | 两秒浅睡眠与五秒深睡眠，均以 RTC 定时器唤醒 | `main/demo_low_power.c` | 深睡眠会重启应用；当前 demo 只提供 RTC 定时器唤醒 |
 | 共享总线 | ES8311 与 CW2017 共用 I2C0 | `bsp_i2c_*` | 所有设备复用 BSP 持有的总线；不能为扫描或新设备再创建同端口总线 |
@@ -30,7 +30,7 @@ FoloToy AI Passport 是一个开放式可穿戴 AI 硬件，本仓库是这款 A
 
 所有引脚、地址、面板参数和按键电压窗口只在 [`components/bsp/include/bsp_pins.h`](../components/bsp/include/bsp_pins.h) 定义。应用代码不得复制这些常量。完整引脚表、面板初始化、ADC 阈值、I2C 地址规则、音频时钟和内存说明见 [AI 硬件开发指南](hardware-design/AI_HARDWARE_DEVELOPMENT_GUIDE.zh_CN.md)。
 
-应用也可以使用 ESP-IDF 提供的定时器、FreeRTOS 任务和内部 Flash/NVS；番茄钟分支提供了 NVS 示例。Wi-Fi 和 Bluetooth LE 仍是 ESP-IDF 应用服务而非 BSP API：其菜单页面仅在打开时初始化对应协议栈、退出时释放。`demo/claude-buddy-port` 仍是更完整的 BLE 应用架构参考，不能替代对当前板卡天线、射频表现、功耗和共存行为的实测。当前产品与固件基线使用 8 MB Flash，包含 3 MB factory-app 分区，并固定保留设备身份与永久 Recovery 区域，使二创固件仍可通过小程序安装。
+应用也可使用 ESP-IDF 定时器、FreeRTOS 任务及内部 Flash/NVS，番茄钟分支提供了 NVS 示例。Wi-Fi 和 Bluetooth LE 仍属于应用服务而非 BSP API。BLE 常驻运行，Wi-Fi 由串行工作任务统一管理并按需开启射频；退出设置不会销毁协议栈。天线、射频、功耗及共存表现仍需实机测量。固件使用 8 MB Flash、3 MB factory-app 分区，固定保留设备身份及永久 Recovery 区域，以兼容小程序安装。
 
 ### 不属于当前能力契约的事项
 

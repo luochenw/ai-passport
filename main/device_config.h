@@ -32,12 +32,16 @@ void device_config_ble_register(void);
 // 返回的指针指向内部缓存,调用方不要持有过长时间(下一次配置下发会改写它)。
 const char *device_config_wifi_ssid(void);
 const char *device_config_wifi_password(void);
+void device_config_wifi_copy(char *ssid, size_t ssid_size,
+                             char *password, size_t password_size);
 // 通用键值:给各个应用放自己的配置(比如某个应用的接口地址和口令)。
 // key 建议用 "<应用名>.<字段>" 的形式,避免不同应用互相踩。
 // 找不到时返回 fallback(可以是 NULL)。
 const char *device_config_get(const char *key, const char *fallback);
 
 int  device_config_volume(void);        // 0..100
+bool device_config_boot_chime_enabled(void); // Default off; stored on Passport.
+int  device_config_boot_chime_volume(void);  // Independent startup volume, default 20.
 bool device_config_has_wifi(void);      // ssid 非空才算配过
 
 // 屏幕亮度 0..100。
@@ -53,6 +57,13 @@ void device_config_set_volume(int volume);
 void device_config_set_brightness(int brightness);
 bool device_config_set(const char *key, const char *value);
 
+// Non-blocking local settings writes. The configuration worker drains them;
+// button/LVGL callbacks must not perform NVS I/O.
+bool device_config_request_set(const char *key, const char *value);
+void device_config_process_pending(void);
+void device_config_request_snapshot(void);
+uint32_t device_config_write_failures(void);
+
 // 配置变更计数。应用可以缓存这个值,发现变了就重新读一遍配置 —— 比每帧都
 // 去 NVS 读要便宜得多,也不需要回调注册。
 uint32_t device_config_revision(void);
@@ -65,6 +76,8 @@ uint32_t device_config_revision(void);
 //
 // 格式跟下发方向一致,也是文本行 "<key>=<value>\n",这样两端用同一套解析,
 // 加字段不需要动协议版本号。
+// 固件版本通过 `firmware.version=<esp_app_desc_t.version>` 上报；它来自根目录
+// VERSION 和构建时的 Git 标识，不写入 NVS，也不允许对端修改。
 //
 // 一次可以推多行。超过一个 ATT 包会自动分片,对端靠结尾换行判断收齐。
 // 返回 false 表示这一批没发出去。最常见的原因是 NimBLE 的 mbuf 池被占满

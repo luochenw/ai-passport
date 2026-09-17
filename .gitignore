@@ -1,4 +1,5 @@
 build/
+/.ccache/
 /mac-relay/build-ios/
 /mac-relay/build-ios-sim/
 mac-relay/AppCatalog/*.bin
@@ -17,3 +18,5 @@ build-dashboard/
 # Xcode 的**每个用户各自的**界面状态和 scheme 管理。跟代码无关,
 # 而且是二进制,提交进去只会在多人协作时天天冲突。
 xcuserdata/
+.DS_Store
+/mac-relay/FoloCodexRelay.xcodeproj/project.xcworkspace/

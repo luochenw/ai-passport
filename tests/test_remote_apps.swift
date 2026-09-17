@@ -170,16 +170,42 @@ struct TestRemoteApps {
             let h = makeHost("settings-route", c)
             h.register(FakeApp("面板"))
             h.register(FakeApp("对讲机", settingsRoute: .walkieTalkie))
-            h.register(FakeApp("吃饭", settingsRoute: .meal))
+            h.register(FakeApp("字节餐厅", settingsRoute: .meal))
             h.waitForPendingWork()
 
             let panel = c.lists.last?.first { $0.name == "面板" }
             let walkie = c.lists.last?.first { $0.name == "对讲机" }
-            let meal = c.lists.last?.first { $0.name == "吃饭" }
+            let meal = c.lists.last?.first { $0.name == "字节餐厅" }
             checkEqual(panel?.settingsRoute, nil, "普通应用不显示设置入口")
             checkEqual(walkie?.settingsRoute, .walkieTalkie,
                        "对讲机列表项携带设置路由")
-            checkEqual(meal?.settingsRoute, .meal, "吃饭列表项携带设置路由")
+            checkEqual(meal?.settingsRoute, .meal, "字节餐厅列表项携带设置路由")
+        }
+
+        print("== 2c. 吃饭重命名后保留安装状态和图标 ==")
+        do {
+            let defaults = freshDefaults("meal-rename")
+            defaults.set(["吃饭"], forKey: "remote.installed.dev")
+            defaults.set(["吃饭": "旧图标"], forKey: "remote.icons.dev")
+            let c = Collector()
+            let h = RemoteAppHost(
+                send: { c.screens.append($0) },
+                sendManifest: { c.manifests.append($0) },
+                deviceKey: "dev", defaults: defaults, enableDebugChannel: false
+            )
+            h.setListObserver { c.lists.append($0) }
+            let app = FakeApp("字节餐厅")
+            h.register(app)
+            h.waitForPendingWork()
+            check(app.installed, "旧名称自动迁移为字节餐厅")
+            checkEqual(defaults.stringArray(forKey: "remote.installed.dev"), ["字节餐厅"],
+                       "新名称已持久化")
+            h.deviceReady()
+            h.waitForPendingWork()
+            checkEqual(manifestNames(c.manifests.last ?? ""), ["字节餐厅"],
+                       "设备首屏收到新名称")
+            checkEqual(manifestIcons(c.manifests.last ?? ""), ["旧图标"],
+                       "自定义图标随重命名迁移")
         }
 
         print("== 3. 首屏按下标打开的是已安装的那个 ==")
@@ -244,6 +270,59 @@ struct TestRemoteApps {
             h.waitForPendingWork()
             check(refusal != nil, "第 9 个被拒绝并给出了原因")
             checkEqual(manifestNames(c.manifests.last ?? "").count, 8, "清单没有被撑大(设备侧只有 8 个槽,多了会静默截断)")
+        }
+
+        print("== 4b. Passport 首屏长按按清单下标卸载 ==")
+        do {
+            let c = Collector()
+            let h = makeHost("uninstall-from-device", c)
+            let first = FakeApp("面板")
+            h.register(first)
+            h.register(FakeApp("Codex"))
+            h.requestInstall("面板", true)
+            h.requestInstall("Codex", true)
+            h.waitForPendingWork()
+
+            h.uninstallApp(at: 0)
+            h.waitForPendingWork()
+            checkEqual(manifestNames(c.manifests.last ?? ""), ["Codex"],
+                       "卸载后由 companion 回推权威清单")
+            checkEqual(first.installed, false, "被卸载应用收到安装状态变化")
+
+            let before = c.manifests.count
+            h.uninstallApp(at: 9)
+            h.waitForPendingWork()
+            checkEqual(c.manifests.count, before + 1,
+                       "清单不同步时重推权威清单而不误删")
+        }
+
+        print("== 4c. 卸载后旧下标不能重新激活应用商店 ==")
+        do {
+            let c = Collector()
+            let h = makeHost("uninstall-stale-open", c)
+            h.register(FakeApp("面板"))
+            h.register(FakeApp("Codex"))
+            h.requestInstall("面板", true)
+            h.requestInstall("Codex", true)
+            h.waitForPendingWork()
+
+            // 留下一张“已经全部安装”的商店屏，并模拟从远程页返回首屏。
+            h.openApp(0xFE)
+            h.setDeviceActive(false)
+            h.waitForPendingWork()
+            check(c.screens.last?.contains("已经全部安装") == true, "先构造旧商店屏")
+
+            // 卸载后设备若还没重绘首屏，旧的末尾下标会暂时越界。旧实现保留
+            // inStore=true，随后 ACTIVE 会再次推“已经全部安装”，于是看起来
+            // 所有 App 都打开成了应用商店。
+            h.uninstallApp(at: 1)
+            h.openApp(1)
+            h.setDeviceActive(true)
+            h.waitForPendingWork()
+            check(c.screens.last?.contains("应用列表已更新") == true,
+                  "旧下标只提示刷新列表，不会回落到上一次的商店状态")
+            check(c.screens.last?.contains("已经全部安装") == false,
+                  "越界 OPEN 不会重新推出旧商店屏")
         }
 
         print("== 5b. 设备上的商店按确定安装,同样受 8 个上限约束 ==")
@@ -389,6 +468,19 @@ struct TestRemoteApps {
                 check(DeviceText.width(String(line.dropFirst())) <= DeviceText.rowBudget,
                       "正文行没超过一行的宽度")
             }
+
+            var styled = Screen()
+            styled.text("档口标题", style: .accent)
+            styled.text("  菜品")
+            checkEqual(styled.encode(), "L档口标题\nS0|accent\nL  菜品\n",
+                       "强调色作为 L 行后的附加元数据发送，旧固件仍能显示正文")
+
+            let indented = DeviceText.wrap(String(repeating: "菜", count: 30),
+                                           limit: Int.max,
+                                           widthBudget: DeviceText.rowBudget - 2)
+                .map { "  " + $0 }
+            check(indented.allSatisfy { DeviceText.width($0) <= DeviceText.rowBudget },
+                  "缩进菜品预留两格后折行，不会被 Screen 省略")
         }
 
         print("")

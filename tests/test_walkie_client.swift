@@ -23,6 +23,7 @@ struct TestWalkieClient {
         let suite = "test.walkie.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("   ", forKey: "walkie.server")
 
         let client = WalkieClient(deviceKey: "devA", defaultName: "Passport-2C44",
                                   defaults: defaults)
@@ -30,6 +31,27 @@ struct TestWalkieClient {
         check(config.server == "ws://127.0.0.1:8787/v1/ws", "默认连接本机服务")
         check(config.room == "local", "默认房间为 local")
         check(config.name == "Passport-2C44", "默认昵称派生自设备广播名")
+        check(WalkieClient.normalizedURL("203.0.113.8")?.absoluteString ==
+              "ws://203.0.113.8:8787/v1/ws", "公网 IP 可省略协议和默认端口")
+        check(WalkieClient.normalizedURL("https://talk.example.com")?.absoluteString ==
+              "wss://talk.example.com/v1/ws", "HTTPS 地址转换为安全 WebSocket")
+        check(WalkieClient.normalizedURL("") == nil, "拒绝空服务器地址")
+
+        let configDir = URL(fileURLWithPath: ProcessInfo.processInfo.environment["HOME"]!)
+            .appendingPathComponent(".folotoy/apps", isDirectory: true)
+        try! FileManager.default.createDirectory(at: configDir,
+                                                 withIntermediateDirectories: true)
+        try! Data(#"{"server":"198.51.100.7:8787"}"#.utf8)
+            .write(to: configDir.appendingPathComponent("walkie.json"))
+        let configSuite = "test.walkie.config.\(UUID().uuidString)"
+        let configDefaults = UserDefaults(suiteName: configSuite)!
+        defer { configDefaults.removePersistentDomain(forName: configSuite) }
+        let configured = WalkieClient(deviceKey: "configured", defaultName: "Passport",
+                                      defaults: configDefaults)
+        check(configured.currentConfiguration().server ==
+              "ws://198.51.100.7:8787/v1/ws",
+              "从标准本地配置读取对讲服务地址")
+        try? FileManager.default.removeItem(at: configDir.appendingPathComponent("walkie.json"))
 
         // ⚠ 每台设备必须有**不同**的 clientId。服务端在同一房间里按 clientId
         // 顶号(services/walkie-server/main.go:296-308),两台共用一个的话会

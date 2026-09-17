@@ -20,14 +20,15 @@
 1. **ccache 缓存恢复**：使用 `actions/cache` 缓存编译中间产物（`.ccache`），二次编译大幅提速。缓存 key 含 ref 与 commit SHA；缓存保留时间以仓库的 GitHub Actions 设置为准。
 2. **编译与验证**（ESP-IDF 5.5.3 / esp32c3）：运行与本地相同的 `./tools/validate.sh --firmware`。脚本使用 `sdkconfig.defaults` 和 `partitions.csv` 构建固件，再执行 `idf.py merge-bin`。
 3. **验证完整固件**：脚本逐字节确认 bootloader、partition-table 和 app 位于 `0x0`、`0x8000` 和 `0x10000`，确认 `flash_args` 使用 8 MB Flash，并完整检查小程序 BLE 兼容契约，最后输出 `build/FoloToy-AI-Passport-full.bin`。
-4. **上传 artifact**：每次成功构建都上传 `FoloToy-AI-Passport-full.bin`。普通分支只有从该分支手动运行 `workflow_dispatch` 才会构建；普通 push 不触发。
+4. **上传 artifact**：每次成功构建都上传固定别名 `FoloToy-AI-Passport-full.bin` 与带版本名称的完整镜像。tag 构建先检查 tag 必须匹配 `v<VERSION>` 或 `v<VERSION>-<应用名>`，再设置 `FOLO_FIRMWARE_RELEASE=1`，因此写入 `esp_app_desc_t` 的是根目录 `VERSION` 中的纯版本号；手动构建保留 Git 来源信息。普通分支只有从该分支手动运行 `workflow_dispatch` 才会构建；普通 push 不触发。
 5. **发布 tag**：tag 构建完成后，独立 release job 下载上述 artifact，并创建 GitHub Release。
 
 构建 job 只有 `contents: read` 权限；仅 release job 在 tag 发布时获得 `contents: write`。所有 Action 均固定到完整 commit SHA，行尾注释保留对应发布版本，升级时需同时核对 SHA 与版本。
 
 ## 产物
 
-- `FoloToy-AI-Passport-full.bin`：合并后的完整固件，可直接烧录（唯一产物）。
+- `FoloToy-AI-Passport-full.bin`：合并后的完整固件固定别名，可直接烧录。
+- `FoloToy-AI-Passport-v<版本>-full.bin`：内容相同、文件名带版本的发布产物。
 
 ## 在线烧录
 

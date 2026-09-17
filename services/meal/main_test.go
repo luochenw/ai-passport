@@ -110,6 +110,8 @@ func TestMealBroadcastOnlyInstalledAndDeduplicates(t *testing.T) {
 
 func TestMealUpdateEndpointKeepsHistory(t *testing.T) {
 	hub := newMealHub("")
+	// 菜单写入仍以 loopback 为边界，不要求读取用的 Bearer 口令。
+	hub.sharedToken = "meal-secret"
 	hub.now = func() time.Time {
 		return time.Date(2026, 9, 3, 11, 0, 0, 0, hub.location)
 	}
@@ -142,7 +144,75 @@ func TestMealUpdateEndpointKeepsHistory(t *testing.T) {
 	}
 }
 
+func TestMealReadEndpointsRequireBearerToken(t *testing.T) {
+	hub := newMealHub("")
+	hub.sharedToken = "meal-secret"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/meals/current", hub.handleCurrent)
+	mux.HandleFunc("/v1/meals/weeks", hub.handleWeeks)
+
+	for _, path := range []string{"/v1/meals/current", "/v1/meals/weeks"} {
+		for _, authorization := range []string{"", "Bearer wrong"} {
+			request := httptest.NewRequest(http.MethodGet, path, nil)
+			request.Header.Set("Authorization", authorization)
+			recorder := httptest.NewRecorder()
+			mux.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusUnauthorized {
+				t.Fatalf("path=%s auth=%q status=%d", path, authorization, recorder.Code)
+			}
+		}
+
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("Authorization", "Bearer meal-secret")
+		recorder := httptest.NewRecorder()
+		mux.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("authorized path=%s status=%d body=%s",
+				path, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
+func TestMealReadAuthDisabledWhenTokenEmpty(t *testing.T) {
+	hub := newMealHub("")
+	hub.sharedToken = ""
+	request := httptest.NewRequest(http.MethodGet, "/v1/meals/current", nil)
+	recorder := httptest.NewRecorder()
+	hub.handleCurrent(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestMealWebSocketRequiresJoinToken(t *testing.T) {
+	hub := newMealHub("")
+	hub.sharedToken = "meal-secret"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/meals/ws", hub.handleWebSocket)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	unauthorized := dialMealClientWithToken(t, server.URL, "bad-token", true, "wrong")
+	defer unauthorized.CloseNow()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, _, err := unauthorized.Read(ctx)
+	if websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
+		t.Fatalf("unexpected unauthorized websocket error: %v", err)
+	}
+
+	authorized := dialMealClientWithToken(t, server.URL, "good-token", true, "meal-secret")
+	defer authorized.CloseNow()
+	readMealEvent(t, authorized, "meal_state")
+}
+
 func dialMealClient(t *testing.T, serverURL, id string, installed bool) *websocket.Conn {
+	return dialMealClientWithToken(t, serverURL, id, installed, "")
+}
+
+func dialMealClientWithToken(
+	t *testing.T, serverURL, id string, installed bool, token string,
+) *websocket.Conn {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -152,7 +222,7 @@ func dialMealClient(t *testing.T, serverURL, id string, installed bool) *websock
 		t.Fatal(err)
 	}
 	message, _ := json.Marshal(mealClientMessage{
-		Type: "join", ClientID: id, Installed: installed,
+		Type: "join", ClientID: id, Installed: installed, Token: token,
 	})
 	if err := conn.Write(ctx, websocket.MessageText, message); err != nil {
 		t.Fatal(err)

@@ -5,6 +5,7 @@
 #include "remote_ui.h"
 #include "ui_notify.h"
 #include "ble_hub.h"
+#include "ui_text_sanitize.h"
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -44,6 +45,7 @@ static const ble_uuid128_t s_manifest_uuid =
 #define REMOTE_EVT_ACTIVE  1   // param_a = 1 进入远程界面 / 0 离开
 #define REMOTE_EVT_HELLO   2   // 订阅完成,对端可以开始推屏幕了
 #define REMOTE_EVT_OPEN    3   // 用户在首屏选了某个应用,param_a = 下标
+#define REMOTE_EVT_UNINSTALL 4 // 用户在首屏长按应用,param_a = 下标
 
 // 一屏内容的上限。对端一次写入可能被 ATT 层拆成多个包,所以要在这里攒齐 ——
 // 攒的依据是结尾的换行:协议规定每个元素独占一行,对端发完一屏必然以 '\n'
@@ -62,8 +64,6 @@ static char     s_apps[REMOTE_UI_MAX_APPS][REMOTE_UI_APP_LEN];
 static char     s_icons[REMOTE_UI_MAX_APPS][REMOTE_UI_ICON_LEN];
 static int      s_app_count;
 
-static void utf8_copy(char *dst, size_t dst_size, const char *src);
-
 // 把清单里的一行拆成图标和名字。格式是 "<图标>\t<名字>",没有制表符的话
 // 整行就是名字、图标为空(兼容旧版配套 app 推过来的清单)。
 static void split_manifest_line(const char *line, char *icon, char *name)
@@ -74,10 +74,10 @@ static void split_manifest_line(const char *line, char *icon, char *name)
         if (n >= REMOTE_UI_ICON_LEN) n = REMOTE_UI_ICON_LEN - 1;
         memcpy(icon, line, n);
         icon[n] = '\0';
-        utf8_copy(name, REMOTE_UI_APP_LEN, tab + 1);
+        ui_text_sanitize_copy(name, REMOTE_UI_APP_LEN, tab + 1);
     } else {
         icon[0] = '\0';
-        utf8_copy(name, REMOTE_UI_APP_LEN, line);
+        ui_text_sanitize_copy(name, REMOTE_UI_APP_LEN, line);
     }
 }
 static uint32_t s_manifest_rev;
@@ -113,25 +113,6 @@ void remote_ui_set_active(bool active)
     send_event(REMOTE_EVT_ACTIVE, active ? 1 : 0, 0);
 }
 
-// 安全截断拷贝:绝不在多字节 UTF-8 字符中间切断。
-//
-// 屏幕上的每一行、标题、应用名都是对端(或用户)给的文本,长度不受这边控制。
-// 裸 snprintf 按**字节**截断,一个中文字占 3 字节,正好被切在中间时屏幕上
-// 显示的是乱码方块 —— 而编译器的 -Wformat-truncation 只提醒"可能截断",
-// 完全不会提示截断会出乱码。
-//
-// ⚠ 凡是把外来文本拷进定长缓冲的地方都要走这里,不要图省事用 snprintf。
-static void utf8_copy(char *dst, size_t dst_size, const char *src)
-{
-    if (dst_size == 0) return;
-    size_t n = strlen(src);
-    if (n > dst_size - 1) n = dst_size - 1;
-    // 退到一个字符边界上:UTF-8 续字节的高两位是 10。
-    while (n > 0 && ((unsigned char)src[n] & 0xC0) == 0x80) n--;
-    memcpy(dst, src, n);
-    dst[n] = '\0';
-}
-
 // 解析一行,填进 dst。返回 false 表示这行不认识(直接忽略,不是错误 ——
 // 见头文件里关于前向兼容的说明)。
 static bool parse_line(char *line, remote_screen_t *dst)
@@ -146,16 +127,16 @@ static bool parse_line(char *line, remote_screen_t *dst)
 
     switch (tag) {
     case 'T':
-        utf8_copy(dst->title, sizeof(dst->title), body);
+        ui_text_sanitize_copy(dst->title, sizeof(dst->title), body);
         return true;
     case 'H':
-        utf8_copy(dst->footer, sizeof(dst->footer), body);
+        ui_text_sanitize_copy(dst->footer, sizeof(dst->footer), body);
         return true;
     case 'L':
         if (dst->row_count >= REMOTE_UI_MAX_ROWS) return false;
         dst->rows[dst->row_count].kind = REMOTE_ROW_TEXT;
-        utf8_copy(dst->rows[dst->row_count].text,
-                  sizeof(dst->rows[dst->row_count].text), body);
+        ui_text_sanitize_copy(dst->rows[dst->row_count].text,
+                              sizeof(dst->rows[dst->row_count].text), body);
         dst->row_count++;
         return true;
     case 'B': {
@@ -167,9 +148,18 @@ static bool parse_line(char *line, remote_screen_t *dst)
         if (percent > 100) percent = 100;
         dst->rows[dst->row_count].kind = REMOTE_ROW_BAR;
         dst->rows[dst->row_count].percent = percent;
-        utf8_copy(dst->rows[dst->row_count].text,
-                  sizeof(dst->rows[dst->row_count].text), bar ? bar + 1 : "");
+        ui_text_sanitize_copy(dst->rows[dst->row_count].text,
+                              sizeof(dst->rows[dst->row_count].text), bar ? bar + 1 : "");
         dst->row_count++;
+        return true;
+    }
+    case 'S': {
+        size_t index = 0;
+        remote_row_style_t style = REMOTE_ROW_STYLE_BODY;
+        if (!remote_row_style_parse(body, (size_t)dst->row_count, &index, &style)) {
+            return false;
+        }
+        dst->rows[index].style = style;
         return true;
     }
     case 'M':
@@ -207,8 +197,7 @@ static void commit_screen(void)
 
 // ---- 应用清单:解析、缓存、读取 --------------------------------------------
 
-// 注:UTF-8 安全截断的 utf8_copy() 已经提到本文件前部 —— parse_line() 里
-// 每一行屏幕文本也要用它,原来放在这里只服务应用名是不够的。
+// 注:屏幕文本和应用名都走同一份 UTF-8 截断及 emoji 清理。
 
 static void load_manifest_from_nvs(void)
 {
@@ -271,7 +260,7 @@ static void commit_manifest(void)
 
     s_app_count = count;
     for (int i = 0; i < count; i++) {
-        utf8_copy(s_apps[i], REMOTE_UI_APP_LEN, parsed[i]);
+        ui_text_sanitize_copy(s_apps[i], REMOTE_UI_APP_LEN, parsed[i]);
         snprintf(s_icons[i], REMOTE_UI_ICON_LEN, "%s", parsed_icons[i]);
     }
     s_manifest_rev++;
@@ -293,6 +282,7 @@ static void commit_manifest(void)
 static int manifest_write_cb(uint16_t conn_handle, uint16_t attr_handle,
                              struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
+    if (!ble_hub_is_authorized_conn(conn_handle)) return BLE_ATT_ERR_INSUFFICIENT_AUTHOR;
     (void)conn_handle; (void)attr_handle; (void)arg;
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
 
@@ -345,10 +335,18 @@ void remote_ui_open_app(uint8_t index)
     send_event(REMOTE_EVT_OPEN, index, 0);
 }
 
+void remote_ui_uninstall_app(uint8_t index)
+{
+    // 这里刻意不碰 s_apps / NVS。只有 companion 的安装状态是权威源；它收到
+    // 请求后删除并回推 MANIFEST，设备再走 commit_manifest() 原子更新缓存。
+    send_event(REMOTE_EVT_UNINSTALL, index, 0);
+}
+
 // ⚠ 跑在 NimBLE host 任务里,不碰任何 LVGL 对象。
 static int screen_write_cb(uint16_t conn_handle, uint16_t attr_handle,
                            struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
+    if (!ble_hub_is_authorized_conn(conn_handle)) return BLE_ATT_ERR_INSUFFICIENT_AUTHOR;
     (void)conn_handle;
     (void)attr_handle;
     (void)arg;

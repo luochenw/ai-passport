@@ -32,8 +32,12 @@ fetched from GitHub at launch — plus a small native **capability** for the par
 a manifest cannot describe (realtime audio, a subprocess, file polling). No
 firmware change, no reflash, no partition budget.
 
-The cost is honest and worth stating: **the device does nothing useful on its
-own.** Without a paired computer it shows a home screen and a status bar.
+Applications require a paired companion. Local Settings remain available on
+Passport: Wi-Fi scanning and network selection, startup sound (off by default),
+volume, brightness, firmware updates, and trusted connections. Settings starts
+with Wi-Fi; the application store stays on the home screen. For a secured
+network, enter its password in the companion's Wi-Fi page and write it to the
+device. Passwords are not persisted or logged by the companion.
 
 ## What is here
 
@@ -42,7 +46,7 @@ own.** Without a paired computer it shows a home screen and a status bar.
 | `main/` | Firmware: BLE hub, remote-UI renderer, resident status bar, global notifications, Wi-Fi manager, OTA |
 | `mac-relay/` | Companion app (macOS + iOS, one SwiftUI target). `Shared/` compiles for both; `macOS/` holds what iOS genuinely cannot do |
 | `services/walkie/` | Go WebSocket server for the walkie-talkie (:8787): rooms, half-duplex floor control, realtime audio forwarding. In-memory, records nothing |
-| `services/meal/` | Go service for the canteen menu (:8788): weekly menus, floor recommendation, scheduled reminders |
+| `services/meal/` | Go service for ByteDance Canteen (:8788): weekly menus, floor recommendation, scheduled reminders |
 | `mac-relay/AppManifests/` | The manifests themselves, plus `registry.json` — what the companion fetches and verifies by sha256 |
 | `skills/`, `docs/`, `AGENTS.md` | Conventions and traps, for humans and for AI assistants |
 
@@ -50,6 +54,27 @@ Three applications ship as examples: a **Codex session browser**, a
 **LAN walkie-talkie** (device microphone and speaker, push-to-talk on the down
 key) and a **canteen menu**. All three are manifests — the native half of each
 is only what the manifest cannot express.
+
+## Trusted connections
+
+The Bluetooth advertising name remains the stable hardware identifier
+`FoloPassport-XXXX`; a user alias is stored separately on the Passport. Before
+adding a new iPhone or Mac, open **Connection Management → Add Companion** on
+the Passport, select the discovered Passport in the companion app, compare the
+six-digit Bluetooth code, and confirm it with the Passport OK button. Bonded
+companions reconnect silently afterward. Unknown clients cannot use settings,
+screens, audio, or firmware update services.
+
+One companion can keep independent sessions with several Passports. One
+Passport deliberately accepts only one companion at a time. The current owner
+is sticky; walking out of range releases it for another trusted companion, and
+**Connection Management** provides an explicit handoff when both companions
+are nearby. Firmware updates and active audio sessions cannot be handed off.
+
+The root `VERSION` file is the firmware release source. Development builds add
+the Git revision and dirty marker. The running and bundled versions are shown
+in the companion firmware panel, and the Passport firmware page shows its
+running version without changing the Bluetooth advertising name.
 
 ## Build
 
@@ -92,7 +117,7 @@ a handful. `git blame` over the current tree tells the real story
 | --- | ---: | ---: |
 | `main/` — firmware application layer | **7,203** | 952 |
 | `mac-relay/` — companion app | **10,186** | 0 |
-| `services/` — walkie-talkie and meal servers | **2,410** | 0 |
+| `services/` — walkie-talkie and ByteDance Canteen servers | **2,410** | 0 |
 | `tests/` | **1,184** | 83 |
 | `tools/` | **630** | 522 |
 | `components/` — board support | 44 | **953** |

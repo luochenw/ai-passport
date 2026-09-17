@@ -129,8 +129,9 @@ final class ManifestApp: RemoteApp {
     private func emit(_ rows: [ManifestRow], _ root: JSONValue, into s: inout Screen) {
         for row in rows {
             switch row {
-            case let .text(t):
-                s.text(Template.render(t, root))
+            case let .text(t, style):
+                s.text(Template.render(t, root), style: Screen.RowStyle(
+                    manifestValue: style.map { Template.render($0, root) } ?? ""))
 
             case let .bar(label, value):
                 s.bar(Template.render(label, root),

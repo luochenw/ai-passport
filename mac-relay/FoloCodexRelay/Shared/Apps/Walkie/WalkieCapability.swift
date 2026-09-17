@@ -180,7 +180,7 @@ struct WalkieTalkieView: View {
             }
 
             Section {
-                TextField("服务器", text: $model.serverAddress, prompt: Text("ws://127.0.0.1:8787/v1/ws"))
+                TextField("服务器地址", text: $model.serverAddress, prompt: Text("服务器IP:8787"))
                     #if !os(macOS)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
@@ -196,7 +196,7 @@ struct WalkieTalkieView: View {
                 Text("连接")
             } footer: {
                 // 口令的去向值得说一句 —— 用户填的是能进同一个房间听音频的东西。
-                Text("同一个房间里的人才能互相听到。口令存在系统钥匙串,不写配置文件、不进日志。")
+                Text("局域网可填写“服务器IP:8787”；公网请使用带受信任证书的 wss:// 域名。同一房间和口令的用户可以互相通话；口令保存在系统钥匙串。")
             }
 
             Section {

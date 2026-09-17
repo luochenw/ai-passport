@@ -382,6 +382,7 @@ static void codex_dispatch_message(void)
 static int codex_data_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                                 struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
+    if (!ble_hub_is_authorized_conn(conn_handle)) return BLE_ATT_ERR_INSUFFICIENT_AUTHOR;
     (void)conn_handle;
     (void)attr_handle;
     (void)arg;
@@ -481,13 +482,7 @@ static void codex_send_cmd(uint8_t req, uint8_t param_a, uint8_t param_b)
         return;
     }
     uint8_t payload[3] = { req, param_a, param_b };
-    struct os_mbuf *om = ble_hs_mbuf_from_flat(payload, sizeof(payload));
-    if (!om) {
-        ESP_LOGW(TAG, "构造 CMD indicate mbuf 失败(内存不足)");
-        return;
-    }
-    // ble_gatts_indicate_custom() 无论成功与否都会消费掉这个 mbuf,不用手动释放。
-    int rc = ble_gatts_indicate_custom(ble_hub_conn_handle(), s_cmd_chr_val_handle, om);
+    int rc = ble_hub_indicate(s_cmd_chr_val_handle, payload, sizeof(payload));
     if (rc != 0) {
         ESP_LOGW(TAG, "发送 CMD 请求失败: req=%d rc=%d", req, rc);
     }
@@ -545,14 +540,7 @@ static void voice_send_data(const uint8_t *data, int len)
         s_voice_sent_start = true;
         if (n > 0) memcpy(frame + 1, data + off, n);
 
-        struct os_mbuf *om = ble_hs_mbuf_from_flat(frame, 1 + n);
-        if (!om) {
-            ESP_LOGW(TAG, "构造 AUDIO notify mbuf 失败(内存不足)");
-            return;
-        }
-        // ble_gatts_notify_custom() 无论成功与否都会消费掉这个 mbuf。丢包
-        // (rc != 0)不是致命错误 —— notify 本来就不保证送达,只记日志。
-        int rc = ble_gatts_notify_custom(ble_hub_conn_handle(), s_audio_chr_val_handle, om);
+        int rc = ble_hub_notify(s_audio_chr_val_handle, frame, 1 + n);
         if (rc != 0) {
             ESP_LOGW(TAG, "发送语音分片失败: rc=%d", rc);
         }
@@ -569,12 +557,7 @@ static void voice_send_end(void)
     }
     uint8_t flags = CODEX_VOICE_FLAG_END | (s_voice_sent_start ? 0 : CODEX_VOICE_FLAG_START);
     uint8_t frame[1] = { flags };
-    struct os_mbuf *om = ble_hs_mbuf_from_flat(frame, sizeof(frame));
-    if (!om) {
-        ESP_LOGW(TAG, "构造 AUDIO END mbuf 失败(内存不足)");
-        return;
-    }
-    int rc = ble_gatts_notify_custom(ble_hub_conn_handle(), s_audio_chr_val_handle, om);
+    int rc = ble_hub_notify(s_audio_chr_val_handle, frame, sizeof(frame));
     if (rc != 0) {
         ESP_LOGW(TAG, "发送语音结束分片失败: rc=%d", rc);
     }
@@ -662,7 +645,7 @@ void codex_voice_stop(void)
 
 bool codex_voice_active(void)
 {
-    return s_voice_recording;
+    return s_voice_recording || s_voice_task_busy;
 }
 
 static const struct ble_gatt_svc_def s_gatt_svcs[] = {

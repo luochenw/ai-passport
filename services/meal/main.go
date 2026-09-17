@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -81,6 +82,7 @@ type mealClientMessage struct {
 	Type      string `json:"type"`
 	ClientID  string `json:"clientId,omitempty"`
 	Installed bool   `json:"installed,omitempty"`
+	Token     string `json:"token,omitempty"`
 }
 
 type mealServerEvent struct {
@@ -98,13 +100,58 @@ type mealSubscriber struct {
 }
 
 type mealHub struct {
-	mu        sync.Mutex
-	clients   map[*mealSubscriber]struct{}
-	weeks     []mealWeek
-	sent      map[string]string
-	statePath string
-	location  *time.Location
-	now       func() time.Time
+	mu          sync.Mutex
+	clients     map[*mealSubscriber]struct{}
+	weeks       []mealWeek
+	sent        map[string]string
+	statePath   string
+	location    *time.Location
+	now         func() time.Time
+	sharedToken string
+}
+
+// StoreMealWeeks normalizes, persists and broadcasts collector updates as one
+// snapshot. It is also the common write path used by the local HTTP endpoint.
+func (h *mealHub) StoreMealWeeks(updates []mealWeek) error {
+	if len(updates) == 0 {
+		return errors.New("at least one meal week is required")
+	}
+	normalized := make([]mealWeek, len(updates))
+	copy(normalized, updates)
+	for index := range normalized {
+		if err := normalizeMealWeek(&normalized[index], h.location, h.now()); err != nil {
+			return err
+		}
+	}
+
+	h.mu.Lock()
+	for _, week := range normalized {
+		replaced := false
+		for index := range h.weeks {
+			if h.weeks[index].WeekOf == week.WeekOf {
+				h.weeks[index] = mergeMealWeek(h.weeks[index], week)
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			h.weeks = append(h.weeks, week)
+		}
+	}
+	sort.Slice(h.weeks, func(i, j int) bool { return h.weeks[i].WeekOf > h.weeks[j].WeekOf })
+	if len(h.weeks) > mealHistoryLimit {
+		h.weeks = h.weeks[:mealHistoryLimit]
+	}
+	h.saveLocked()
+	clients := h.installedClientsLocked()
+	weeks := cloneMealWeeks(h.weeks, 12)
+	h.mu.Unlock()
+
+	event := mealServerEvent{Type: "meal_state", Weeks: weeks}
+	for _, client := range clients {
+		h.send(client, event)
+	}
+	return nil
 }
 
 func newMealHub(statePath string) *mealHub {
@@ -113,11 +160,12 @@ func newMealHub(statePath string) *mealHub {
 		location = time.FixedZone("Asia/Shanghai", 8*60*60)
 	}
 	h := &mealHub{
-		clients:   make(map[*mealSubscriber]struct{}),
-		sent:      make(map[string]string),
-		statePath: statePath,
-		location:  location,
-		now:       time.Now,
+		clients:     make(map[*mealSubscriber]struct{}),
+		sent:        make(map[string]string),
+		statePath:   statePath,
+		location:    location,
+		now:         time.Now,
+		sharedToken: os.Getenv("MEAL_SHARED_TOKEN"),
 	}
 	h.load()
 	go h.runScheduler()
@@ -146,6 +194,10 @@ func (h *mealHub) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	var message mealClientMessage
 	if json.Unmarshal(data, &message) != nil || message.Type != "join" {
 		_ = conn.Close(websocket.StatusPolicyViolation, "meal join required")
+		return
+	}
+	if !h.tokenMatches(message.Token) {
+		_ = conn.Close(websocket.StatusPolicyViolation, "unauthorized")
 		return
 	}
 	clientID := wsx.CleanField(message.ClientID, 96)
@@ -253,7 +305,10 @@ func (h *mealHub) sendSnapshot(client *mealSubscriber) {
 	h.send(client, mealServerEvent{Type: "meal_state", Weeks: weeks})
 }
 
-func (h *mealHub) handleCurrent(w http.ResponseWriter, _ *http.Request) {
+func (h *mealHub) handleCurrent(w http.ResponseWriter, r *http.Request) {
+	if !h.authorizeRead(w, r) {
+		return
+	}
 	h.mu.Lock()
 	weeks := cloneMealWeeks(h.weeks, 1)
 	h.mu.Unlock()
@@ -261,6 +316,9 @@ func (h *mealHub) handleCurrent(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (h *mealHub) handleWeeks(w http.ResponseWriter, r *http.Request) {
+	if !h.authorizeRead(w, r) {
+		return
+	}
 	limit := 12
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		if value, err := strconv.Atoi(raw); err == nil {
@@ -271,6 +329,26 @@ func (h *mealHub) handleWeeks(w http.ResponseWriter, r *http.Request) {
 	weeks := cloneMealWeeks(h.weeks, limit)
 	h.mu.Unlock()
 	writeJSON(w, http.StatusOK, mealServerEvent{Type: "meal_state", Weeks: weeks})
+}
+
+func (h *mealHub) authorizeRead(w http.ResponseWriter, r *http.Request) bool {
+	if h.sharedToken == "" {
+		return true
+	}
+	scheme, token, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+	if ok && strings.EqualFold(scheme, "Bearer") && h.tokenMatches(token) {
+		return true
+	}
+	w.Header().Set("WWW-Authenticate", `Bearer realm="meal"`)
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
+	return false
+}
+
+func (h *mealHub) tokenMatches(token string) bool {
+	if h.sharedToken == "" {
+		return true
+	}
+	return subtle.ConstantTimeCompare([]byte(token), []byte(h.sharedToken)) == 1
 }
 
 func (h *mealHub) handleUpdate(w http.ResponseWriter, r *http.Request) {
@@ -289,41 +367,18 @@ func (h *mealHub) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid meal menu: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := normalizeMealWeek(&week, h.location, h.now()); err != nil {
+	if err := h.StoreMealWeeks([]mealWeek{week}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
 	h.mu.Lock()
-	replaced := false
-	for index := range h.weeks {
-		if h.weeks[index].WeekOf == week.WeekOf {
-			h.weeks[index] = mergeMealWeek(h.weeks[index], week)
-			replaced = true
-			break
-		}
-	}
-	if !replaced {
-		h.weeks = append(h.weeks, week)
-	}
-	sort.Slice(h.weeks, func(i, j int) bool { return h.weeks[i].WeekOf > h.weeks[j].WeekOf })
-	if len(h.weeks) > mealHistoryLimit {
-		h.weeks = h.weeks[:mealHistoryLimit]
-	}
-	h.saveLocked()
-	clients := h.installedClientsLocked()
-	weeks := cloneMealWeeks(h.weeks, 12)
+	clients := len(h.installedClientsLocked())
 	h.mu.Unlock()
-
-	event := mealServerEvent{Type: "meal_state", Weeks: weeks}
-	for _, client := range clients {
-		h.send(client, event)
-	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":      true,
 		"weekOf":  week.WeekOf,
 		"days":    len(week.Days),
-		"clients": len(clients),
+		"clients": clients,
 	})
 }
 
@@ -747,6 +802,32 @@ func main() {
 	flag.Parse()
 
 	meals := newMealHub(*statePath)
+	if sessionID, buildingCode := os.Getenv("APLUS_SESSION_ID"), os.Getenv("APLUS_BUILDING_CODE"); sessionID != "" && buildingCode != "" {
+		var notifier aplusAuthNotifier
+		if endpoint := os.Getenv("APLUS_TOKEN_NOTIFY_URL"); endpoint != "" {
+			configured, err := newAplusAuthNotifier(endpoint)
+			if err != nil {
+				log.Printf("invalid APLUS_TOKEN_NOTIFY_URL; token expiry notifications disabled")
+			} else {
+				notifier = configured
+			}
+		}
+		interval := defaultAplusPollInterval
+		if raw := os.Getenv("APLUS_POLL_INTERVAL"); raw != "" {
+			if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
+				interval = parsed
+			} else {
+				log.Printf("invalid APLUS_POLL_INTERVAL; using %s", interval)
+			}
+		}
+		syncer := &aplusSyncer{
+			collector: newAplusCollector(sessionID, buildingCode),
+			sink:      meals, notifier: notifier, location: meals.location, now: meals.now,
+		}
+		go syncer.Run(context.Background(), interval, log.Printf)
+	} else if sessionID != "" || buildingCode != "" {
+		log.Printf("Aplus collector disabled: APLUS_SESSION_ID and APLUS_BUILDING_CODE must both be set")
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {

@@ -7,6 +7,7 @@
 //   3. 连接事件广播给所有观察者,由模块自己认领。
 #include "ble_hub.h"
 #include "demo_radio.h"
+#include "device_trust.h"
 
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -126,20 +127,37 @@ uint16_t ble_hub_conn_handle(void)
     return s_conn_handle;
 }
 
+bool ble_hub_is_authorized_conn(uint16_t conn_handle)
+{
+    return device_trust_is_authorized_conn(conn_handle);
+}
+
 int ble_hub_indicate(uint16_t val_handle, const void *data, int len)
 {
-    if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) return BLE_HS_ENOTCONN;
+    uint16_t conn_handle;
+    uint32_t generation;
+    if (!device_trust_authorized_link(&conn_handle, &generation)) return BLE_HS_EAUTHEN;
     struct os_mbuf *om = ble_hs_mbuf_from_flat(data, (uint16_t)len);
     if (!om) return BLE_HS_ENOMEM;
-    return ble_gatts_indicate_custom(s_conn_handle, val_handle, om);
+    if (!device_trust_authorized_link_matches(conn_handle, generation)) {
+        os_mbuf_free_chain(om);
+        return BLE_HS_ENOTCONN;
+    }
+    return ble_gatts_indicate_custom(conn_handle, val_handle, om);
 }
 
 int ble_hub_notify(uint16_t val_handle, const void *data, int len)
 {
-    if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) return BLE_HS_ENOTCONN;
+    uint16_t conn_handle;
+    uint32_t generation;
+    if (!device_trust_authorized_link(&conn_handle, &generation)) return BLE_HS_EAUTHEN;
     struct os_mbuf *om = ble_hs_mbuf_from_flat(data, (uint16_t)len);
     if (!om) return BLE_HS_ENOMEM;
-    return ble_gatts_notify_custom(s_conn_handle, val_handle, om);
+    if (!device_trust_authorized_link_matches(conn_handle, generation)) {
+        os_mbuf_free_chain(om);
+        return BLE_HS_ENOTCONN;
+    }
+    return ble_gatts_notify_custom(conn_handle, val_handle, om);
 }
 
 void ble_hub_request_fast_interval(bool fast)
@@ -193,6 +211,10 @@ static int advertise(void)
 static int gap_event(struct ble_gap_event *event, void *arg)
 {
     (void)arg;
+    int trust_rc = device_trust_gap_event(event);
+    // Repeat-pairing is the one GAP event where the callback return value tells
+    // NimBLE whether to retry or ignore the new pairing attempt.
+    if (event->type == BLE_GAP_EVENT_REPEAT_PAIRING) return trust_rc;
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
@@ -281,6 +303,7 @@ void ble_hub_init(void)
 
     ble_svc_gap_init();
     ble_svc_gatt_init();
+    device_trust_configure_host();
     int rc = ble_svc_gap_device_name_set(device_name());
     for (int i = 0; rc == 0 && i < s_service_count; i++) {
         rc = ble_gatts_count_cfg(s_services[i]);

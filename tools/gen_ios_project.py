@@ -20,6 +20,7 @@ REL = "mac-relay"
 # 加一个应用 = 新建一个文件夹,这个脚本不用改。
 SRC_DIR = "FoloCodexRelay/Shared"
 PROJ = os.path.join(ROOT, REL, "FoloCodexRelay.xcodeproj")
+BUNDLE_ID = os.environ.get("BUNDLE_ID", "com.folotoy.codexrelay")
 
 
 def ptt_entitlements():
@@ -103,21 +104,22 @@ def main():
         "projconflist", "targetconflist", "projdebug", "projrelease",
         "configphase",
         "targetdebug", "targetrelease", "catalogref", "catalogbuild",
+        "manifestsref", "manifestsbuild",
     )}
 
-    # 应用自己的配置随构建打进 bundle。
-    #
-    # ⚠ 必须是构建阶段,不能构建完再拷:产物是签过名的,事后往里塞文件
-    # 会让签名失效,装机时报 "invalid code signature"。
-    #
-    # 用 /bin/sh 写,不用 compgen(那是 bash 内建,Xcode 的脚本阶段默认 sh)。
+    # 应用自己的配置必须在签名前写进 bundle。install-ios.sh 默认打开该开关；
+    # helper 只复制 server 和无敏感性的鉴权提示位，token 始终不会进入应用产物。
     config_script = (
-        'rm -f \\"${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}/meal.json\\"\\n'
-        'for f in \\"$HOME\\"/.folotoy/*.json; do\\n'
-        '  [ -e \\"$f\\" ] || continue\\n'
-        '  cp \\"$f\\" \\"${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}/\\"\\n'
-        '  echo \\"\\u5df2\\u6253\\u5305: $(basename \\"$f\\")\\"\\n'
-        'done'
+        'python3 \\"${SRCROOT}/../tools/update_firmware_catalog.py\\" --check '
+        '--firmware \\"${SRCROOT}/AppCatalog/current-firmware.bin\\" '
+        '--catalog \\"${SRCROOT}/AppCatalog/catalog.json\\"\\n'
+        'bundle_dir=\\"${BUILT_PRODUCTS_DIR}/${FULL_PRODUCT_NAME}\\"\\n'
+        'rm -f \\"${bundle_dir}/meal.json\\" \\"${bundle_dir}/walkie.json\\"\\n'
+        'if [ \\"${FOLO_BUNDLE_CONFIG:-0}\\" = 1 ]; then\\n'
+        '  python3 \\"${SRCROOT}/bundle-app-configs.py\\" \\"${bundle_dir}\\"\\n'
+        'else\\n'
+        '  echo \\"\\u5e94\\u7528\\u670d\\u52a1\\u5730\\u5740\\u672a\\u6253\\u5305\\"\\n'
+        'fi'
     )
 
     text = f'''// !$*UTF8*$!
@@ -131,12 +133,14 @@ def main():
 /* Begin PBXBuildFile section */
 {chr(10).join(build_files)}
 		{ids["catalogbuild"]} /* AppCatalog in Resources */ = {{isa = PBXBuildFile; fileRef = {ids["catalogref"]} /* AppCatalog */; }};
+		{ids["manifestsbuild"]} /* AppManifests in Resources */ = {{isa = PBXBuildFile; fileRef = {ids["manifestsref"]} /* AppManifests */; }};
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 {chr(10).join(file_refs)}
 		{ids["product"]} /* FoloCodexRelay.app */ = {{isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FoloCodexRelay.app; sourceTree = BUILT_PRODUCTS_DIR; }};
 		{ids["catalogref"]} /* AppCatalog */ = {{isa = PBXFileReference; lastKnownFileType = folder; name = AppCatalog; path = AppCatalog; sourceTree = "<group>"; }};
+		{ids["manifestsref"]} /* AppManifests */ = {{isa = PBXFileReference; lastKnownFileType = folder; name = AppManifests; path = AppManifests; sourceTree = "<group>"; }};
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -145,6 +149,7 @@ def main():
 			children = (
 				{ids["sharedgroup"]} /* Shared */,
 				{ids["catalogref"]} /* AppCatalog */,
+				{ids["manifestsref"]} /* AppManifests */,
 				{ids["productgroup"]} /* Products */,
 			);
 			sourceTree = "<group>";
@@ -237,6 +242,7 @@ def main():
 			buildActionMask = 2147483647;
 			files = (
 				{ids["catalogbuild"]} /* AppCatalog in Resources */,
+				{ids["manifestsbuild"]} /* AppManifests in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		}};
@@ -305,7 +311,7 @@ def main():
 				INFOPLIST_FILE = "FoloCodexRelay/Info-iOS.plist";
 				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.folotoy.codexrelay;
+				PRODUCT_BUNDLE_IDENTIFIER = {BUNDLE_ID};
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -323,7 +329,7 @@ def main():
 				INFOPLIST_FILE = "FoloCodexRelay/Info-iOS.plist";
 				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.folotoy.codexrelay;
+				PRODUCT_BUNDLE_IDENTIFIER = {BUNDLE_ID};
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -363,6 +369,7 @@ def main():
         f.write(text)
     print(f"生成完成: {out}")
     print(f"  {len(sources)} 个源文件(只有 Shared/ 及其子目录,macOS/ 不参与 iOS 构建)")
+    print(f"  Bundle ID: {BUNDLE_ID}")
     print("  DEVELOPMENT_TEAM 不写入工程;真机构建时由 install-ios.sh 临时传入")
 
 

@@ -141,7 +141,7 @@ Troubleshoot in order: bus-init log, scan results for `0x18`/`0x63`, power/groun
 
 ## 8. ES8311 audio
 
-The MCU is I2S master and the ES8311 is slave. I2S0 TX/RX shares MCLK GPIO6, BCLK GPIO5, and WS GPIO3; DOUT is GPIO2 and DIN is GPIO4. The demo opens 16 kHz, 16-bit, mono PCM over a physically two-slot standard-I2S bus.
+The MCU is I2S master and the ES8311 is slave. I2S0 TX/RX shares MCLK GPIO6, BCLK GPIO5, and WS GPIO3; DOUT is GPIO2 and DIN is GPIO4. Every maintained audio path opens 16 kHz, 16-bit, mono PCM, so the initial DMA allocation is mono as well.
 
 - Call `bsp_audio_set_format()` before PCM I/O.
 - A format change must close and reopen `esp_codec_dev`; an already open device is not reconfigured.
@@ -150,7 +150,8 @@ The MCU is I2S master and the ES8311 is slave. I2S0 TX/RX shares MCLK GPIO6, BCL
 - Keep `no_dac_ref=true` for mono microphone input; false can produce all-zero capture.
 - Microphone analog gain is 30 dB; output volume is a separate 0–100% value.
 - `bsp_audio_read/write` block and must not run in button callbacks or the LVGL task.
-- I2S DMA uses six descriptors of 240 frames each.
+- I2S DMA uses six descriptors of 240 mono frames each. Starting with stereo
+  slots wastes about 5.7 KB until the first format change on this no-PSRAM board.
 
 The audio demo's three-second recording buffer is about 96 KB and is the largest transient heap allocation. Prefer chunked streaming for longer audio. Production task shutdown needs a cancellable loop and explicit exit handshake rather than deleting a task blocked in codec I/O.
 

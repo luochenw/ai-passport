@@ -20,15 +20,19 @@
 #include "device_config.h"
 #include "ble_hub.h"
 
+#include "esp_app_desc.h"
 #include "esp_log.h"
 #include "host/ble_gatt.h"
 #include "host/ble_hs.h"
 #include "host/ble_uuid.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 
 static const char *TAG = "device_config";
 static const char *NVS_NAMESPACE = "devcfg";
@@ -59,6 +63,17 @@ static char s_ssid[DEVICE_CONFIG_STR_MAX];
 static char s_password[DEVICE_CONFIG_STR_MAX];
 static int  s_volume = 60;
 static int  s_brightness = 100;
+static bool s_boot_chime_enabled;
+static int s_boot_chime_volume = 20;
+static portMUX_TYPE s_wifi_mux = portMUX_INITIALIZER_UNLOCKED;
+typedef struct {
+    char key[32];
+    char value[DEVICE_CONFIG_STR_MAX];
+} config_request_t;
+static QueueHandle_t s_requests;
+static uint32_t s_write_failures;
+static atomic_bool s_snapshot_pending;
+static bool report_settings_snapshot(void);
 // device_config_get() 的返回值缓冲区。用一个静态缓冲区而不是每次 malloc,
 // 是为了让调用方拿到的是普通 const char* —— 代价是"下一次调用会覆盖上一次
 // 的结果",这一点在头文件里已经写明。
@@ -66,22 +81,50 @@ static char s_scratch[DEVICE_CONFIG_STR_MAX];
 static device_config_cmd_fn s_cmd_handler;
 static device_config_status_hook_fn s_status_hook;
 
+static bool save_integer(const char *key, int value, int minimum, int *cached)
+{
+    if (value < minimum) value = minimum;
+    if (value > 100) value = 100;
+    if (!s_nvs_open || nvs_set_i32(s_nvs, key, value) != ESP_OK ||
+        nvs_commit(s_nvs) != ESP_OK) return false;
+    *cached = value;
+    s_revision++;
+    return true;
+}
+
 static void load_cached(void)
 {
     if (!s_nvs_open) return;
-    size_t len = sizeof(s_ssid);
-    if (nvs_get_str(s_nvs, "wifi.ssid", s_ssid, &len) != ESP_OK) s_ssid[0] = '\0';
-    len = sizeof(s_password);
-    if (nvs_get_str(s_nvs, "wifi.pass", s_password, &len) != ESP_OK) s_password[0] = '\0';
+    char ssid[sizeof(s_ssid)] = "";
+    char password[sizeof(s_password)] = "";
+    size_t len = sizeof(ssid);
+    if (nvs_get_str(s_nvs, "wifi.ssid", ssid, &len) != ESP_OK) ssid[0] = '\0';
+    len = sizeof(password);
+    if (nvs_get_str(s_nvs, "wifi.pass", password, &len) != ESP_OK) password[0] = '\0';
+    portENTER_CRITICAL(&s_wifi_mux);
+    memcpy(s_ssid, ssid, sizeof(s_ssid));
+    memcpy(s_password, password, sizeof(s_password));
+    portEXIT_CRITICAL(&s_wifi_mux);
     int32_t v = 60;
     if (nvs_get_i32(s_nvs, "volume", &v) == ESP_OK) s_volume = (int)v;
     int32_t b = 100;
     if (nvs_get_i32(s_nvs, "brightness", &b) == ESP_OK) s_brightness = (int)b;
     if (s_brightness < DEVICE_CONFIG_MIN_BRIGHTNESS) s_brightness = DEVICE_CONFIG_MIN_BRIGHTNESS;
+    if (s_brightness > 100) s_brightness = 100;
+    if (s_volume < 0) s_volume = 0;
+    if (s_volume > 100) s_volume = 100;
+    uint8_t chime = 0;
+    // NVS keys have a 15-character limit; keep the public protocol descriptive.
+    if (nvs_get_u8(s_nvs, "boot_chime", &chime) != ESP_OK) chime = 0;
+    s_boot_chime_enabled = chime == 1;
+    int32_t chime_volume = 20;
+    if (nvs_get_i32(s_nvs, "boot_volume", &chime_volume) != ESP_OK) chime_volume = 20;
+    s_boot_chime_volume = chime_volume < 0 ? 0 : chime_volume > 100 ? 100 : chime_volume;
 }
 
 void device_config_init(void)
 {
+    if (!s_requests) s_requests = xQueueCreate(4, sizeof(config_request_t));
     // nvs_flash_init() 可能已经被别的模块调过(BLE 也需要 NVS),重复调用是
     // 安全的,返回 ESP_ERR_NVS_NO_FREE_PAGES 时才需要擦了重来。
     esp_err_t err = nvs_flash_init();
@@ -109,7 +152,41 @@ const char *device_config_wifi_password(void) { return s_password; }
 bool        device_config_has_wifi(void)      { return s_ssid[0] != '\0'; }
 int         device_config_volume(void)        { return s_volume; }
 int         device_config_brightness(void)    { return s_brightness; }
+bool        device_config_boot_chime_enabled(void) { return s_boot_chime_enabled; }
+int         device_config_boot_chime_volume(void) { return s_boot_chime_volume; }
 uint32_t    device_config_revision(void)      { return s_revision; }
+uint32_t    device_config_write_failures(void) { return s_write_failures; }
+
+void device_config_wifi_copy(char *ssid, size_t ssid_size,
+                             char *password, size_t password_size)
+{
+    portENTER_CRITICAL(&s_wifi_mux);
+    if (ssid && ssid_size) strlcpy(ssid, s_ssid, ssid_size);
+    if (password && password_size) strlcpy(password, s_password, password_size);
+    portEXIT_CRITICAL(&s_wifi_mux);
+}
+
+bool device_config_request_set(const char *key, const char *value)
+{
+    if (!s_requests || !key || !value) return false;
+    config_request_t request = {0};
+    if (strlen(key) >= sizeof(request.key) || strlen(value) >= sizeof(request.value)) return false;
+    strlcpy(request.key, key, sizeof(request.key));
+    strlcpy(request.value, value, sizeof(request.value));
+    return xQueueSend(s_requests, &request, 0) == pdTRUE;
+}
+
+void device_config_process_pending(void)
+{
+    config_request_t request;
+    while (s_requests && xQueueReceive(s_requests, &request, 0) == pdTRUE) {
+        if (!device_config_set(request.key, request.value)) s_write_failures++;
+    }
+    if (device_config_status_ready() && atomic_exchange(&s_snapshot_pending, false) &&
+        !report_settings_snapshot()) atomic_store(&s_snapshot_pending, true);
+}
+
+void device_config_request_snapshot(void) { atomic_store(&s_snapshot_pending, true); }
 
 const char *device_config_get(const char *key, const char *fallback)
 {
@@ -147,6 +224,24 @@ bool device_config_set(const char *key, const char *value)
 
     if (!s_nvs_open) return false;
 
+    if (strcmp(key, "boot_chime.volume") == 0) {
+        if (!value || !value[0]) return false;
+        char *end;
+        long volume = strtol(value, &end, 10);
+        if (*end || volume < 0 || volume > 100) return false;
+        return save_integer("boot_volume", (int)volume, 0, &s_boot_chime_volume);
+    }
+
+    if (strcmp(key, "boot_chime.enabled") == 0) {
+        if (!value || (strcmp(value, "0") != 0 && strcmp(value, "1") != 0)) return false;
+        bool enabled = value[0] == '1';
+        if (nvs_set_u8(s_nvs, "boot_chime", enabled ? 1 : 0) != ESP_OK ||
+            nvs_commit(s_nvs) != ESP_OK) return false;
+        s_boot_chime_enabled = enabled;
+        s_revision++;
+        return true;
+    }
+
     // volume 在 NVS 里是 i32,不是字符串 —— 配置通道是纯文本的,如果照直
     // 当字符串存下去,写进去的是 "75" 而读的时候 nvs_get_i32 找不到这个
     // 类型的键,于是永远读回旧值。实测过一次:下发 volume=75、重启,设备
@@ -154,17 +249,18 @@ bool device_config_set(const char *key, const char *value)
     // 保证"怎么写的"和"怎么读的"只有一份真相。
     if (strcmp(key, "volume") == 0) {
         if (!value || value[0] == '\0') return false;
-        device_config_set_volume(atoi(value));
-        ESP_LOGI(TAG, "配置已更新: volume(revision=%u)", (unsigned)s_revision);
-        return true;
+        return save_integer(key, atoi(value), 0, &s_volume);
     }
     // 亮度同理:存的是 i32,照字符串写进去 nvs_get_i32 读不到这个类型的键,
     // 于是"下发了但没反应",而且不报错不打日志。
     if (strcmp(key, "brightness") == 0) {
         if (!value || value[0] == '\0') return false;
-        device_config_set_brightness(atoi(value));
-        ESP_LOGI(TAG, "配置已更新: brightness(revision=%u)", (unsigned)s_revision);
-        return true;
+        return save_integer(key, atoi(value), DEVICE_CONFIG_MIN_BRIGHTNESS, &s_brightness);
+    }
+
+    if (strcmp(key, "wifi.ssid") == 0 || strcmp(key, "wifi.pass") == 0) {
+        size_t maximum = strcmp(key, "wifi.ssid") == 0 ? 32 : 64;
+        if (value && (strlen(value) > maximum || strpbrk(value, "\r\n\t"))) return false;
     }
 
     // 空值**存成空串**,不删键。
@@ -197,26 +293,12 @@ bool device_config_set(const char *key, const char *value)
 void device_config_set_brightness(int brightness)
 {
     // 钳住下限:0 是全灭,而设备上没有任何入口能把它调回来。见头文件说明。
-    if (brightness < DEVICE_CONFIG_MIN_BRIGHTNESS) brightness = DEVICE_CONFIG_MIN_BRIGHTNESS;
-    if (brightness > 100) brightness = 100;
-    s_brightness = brightness;
-    if (!s_nvs_open) return;
-    if (nvs_set_i32(s_nvs, "brightness", brightness) == ESP_OK) {
-        nvs_commit(s_nvs);
-        s_revision++;
-    }
+    save_integer("brightness", brightness, DEVICE_CONFIG_MIN_BRIGHTNESS, &s_brightness);
 }
 
 void device_config_set_volume(int volume)
 {
-    if (volume < 0) volume = 0;
-    if (volume > 100) volume = 100;
-    s_volume = volume;
-    if (!s_nvs_open) return;
-    if (nvs_set_i32(s_nvs, "volume", volume) == ESP_OK) {
-        nvs_commit(s_nvs);
-        s_revision++;
-    }
+    save_integer("volume", volume, 0, &s_volume);
 }
 
 // ---- BLE 配置下发 -----------------------------------------------------------
@@ -230,15 +312,15 @@ static bool     s_status_subscribed;
 
 // 解析 "<key>=<value>" 单行并落盘。行内没有 '=' 的直接忽略(不是错误 —— 对端
 // 可能发了空行或注释)。
-static void apply_line(char *line)
+static bool apply_line(char *line)
 {
     while (*line == ' ' || *line == '\r') line++;
-    if (*line == '\0' || *line == '#') return;
+    if (*line == '\0' || *line == '#') return true;
 
     char *eq = strchr(line, '=');
     if (!eq) {
         ESP_LOGW(TAG, "配置行缺少 '=',忽略");
-        return;
+        return false;
     }
     *eq = '\0';
     char *key = line;
@@ -249,23 +331,23 @@ static void apply_line(char *line)
     while (vlen > 0 && (value[vlen-1] == '\r' || value[vlen-1] == '\n')) {
         value[--vlen] = '\0';
     }
-    if (strlen(key) == 0) return;
+    if (strlen(key) == 0) return false;
 
-    device_config_set(key, value);
+    return device_config_set(key, value);
 }
 
 static int config_write_cb(uint16_t conn_handle, uint16_t attr_handle,
                            struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
-    (void)conn_handle;
     (void)attr_handle;
     (void)arg;
 
+    if (!ble_hub_is_authorized_conn(conn_handle)) return BLE_ATT_ERR_INSUFFICIENT_AUTHOR;
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
 
     uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
     if (len == 0) return 0;
-    if (len >= sizeof(s_write_buf)) len = sizeof(s_write_buf) - 1;
+    if (len >= sizeof(s_write_buf)) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     if (ble_hs_mbuf_to_flat(ctxt->om, s_write_buf, len, NULL) != 0) {
         return BLE_ATT_ERR_UNLIKELY;
     }
@@ -276,7 +358,7 @@ static int config_write_cb(uint16_t conn_handle, uint16_t attr_handle,
     while (cursor && *cursor) {
         char *nl = strchr(cursor, '\n');
         if (nl) *nl = '\0';
-        apply_line(cursor);
+        if (!apply_line(cursor)) return BLE_ATT_ERR_UNLIKELY;
         cursor = nl ? nl + 1 : NULL;
     }
     return 0;
@@ -333,6 +415,20 @@ void device_config_report_kv(const char *key, const char *value)
     device_config_report(line);
 }
 
+static bool report_settings_snapshot(void)
+{
+    const esp_app_desc_t *app = esp_app_get_description();
+    char items[DEVICE_CONFIG_STR_MAX] = "battery,ble,wifi,time";
+    size_t length = sizeof(items);
+    if (s_nvs_open) nvs_get_str(s_nvs, "sb.items", items, &length);
+    char snapshot[320];
+    snprintf(snapshot, sizeof(snapshot),
+             "firmware.version=%s\nvolume=%d\nbrightness=%d\nboot_chime.enabled=%d\nboot_chime.volume=%d\nsb.items=%s\n",
+             app ? app->version : "unknown", s_volume, s_brightness,
+             s_boot_chime_enabled ? 1 : 0, s_boot_chime_volume, items);
+    return device_config_report(snapshot);
+}
+
 static void on_ble_subscribe(uint16_t attr_handle, bool subscribed)
 {
     if (attr_handle != s_status_chr_val_handle) return;
@@ -340,12 +436,7 @@ static void on_ble_subscribe(uint16_t attr_handle, bool subscribed)
     if (subscribed) {
         // 对端刚订阅上,先把当前状态推一遍 —— 否则它要等到下一次状态变化
         // 才知道设备是什么样子,界面上会空一段时间。
-        char snapshot[256];
-        snprintf(snapshot, sizeof(snapshot),
-                 "volume=%d\nbrightness=%d\nsb.items=%s\n",
-                 s_volume, s_brightness,
-                 device_config_get("sb.items", "battery,ble,wifi,time"));
-        device_config_report(snapshot);
+        device_config_request_snapshot();
         // 剩下的状态(Wi-Fi 之类)配置层不知道,交给上面注册的钩子补。
         if (s_status_hook) s_status_hook();
     }

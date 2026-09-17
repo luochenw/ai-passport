@@ -84,7 +84,7 @@ final class MealNotificationScheduler {
         guard !period.recommendedFloor.isEmpty else { return }
 
         let content = UNMutableNotificationContent()
-        content.title = "吃饭"
+        content.title = "字节餐厅"
         let mealName = meal == "lunch" ? "午饭" : "晚饭"
         content.body = mealName + "去" + period.recommendedFloor +
             (period.recommendation.isEmpty ? "" : "：" + period.recommendation)

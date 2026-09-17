@@ -46,8 +46,11 @@ static esp_err_t i2s_full_duplex_init(void) {
         .slot_cfg = {
             .data_bit_width = I2S_DATA_BIT_WIDTH_16BIT,
             .slot_bit_width = I2S_SLOT_BIT_WIDTH_AUTO,
-            .slot_mode = I2S_SLOT_MODE_STEREO,
-            .slot_mask = I2S_STD_SLOT_BOTH,
+            // Every supported audio path is mono. Starting in stereo kept a
+            // second TX and RX DMA slot alive until the first playback/record
+            // reconfiguration, consuming about 5.7 KB on this no-PSRAM board.
+            .slot_mode = I2S_SLOT_MODE_MONO,
+            .slot_mask = I2S_STD_SLOT_LEFT,
             .ws_width = I2S_DATA_BIT_WIDTH_16BIT,
             .ws_pol = false,
             .bit_shift = true,

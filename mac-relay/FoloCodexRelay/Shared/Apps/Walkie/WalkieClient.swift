@@ -2,6 +2,11 @@ import Foundation
 import Security
 
 final class WalkieClient {
+    private struct Config: Decodable {
+        let server: String
+        let authRequired: Bool?
+    }
+
     typealias SnapshotHandler = (WalkieSnapshot) -> Void
     private static let remoteInstalledKey = "remote.installed"
     private static let appName = "对讲机"
@@ -28,6 +33,7 @@ final class WalkieClient {
     private var snapshot = WalkieSnapshot()
 
     private var serverAddress: String
+    private var authRequired = false
     private var room: String
     private var displayName: String
     /// 服务端在 welcome 里分配给自己的 id。判断「在讲话的是不是我」只能靠它。
@@ -71,13 +77,12 @@ final class WalkieClient {
     init(deviceKey: String, defaultName: String, defaults: UserDefaults = .standard) {
         self.defaults = defaults
         self.deviceKey = deviceKey
-        #if os(macOS)
-        let defaultServer = "ws://127.0.0.1:8787/v1/ws"
-        #else
-        let defaultServer = ""
-        #endif
-        serverAddress = defaults.string(forKey: "walkie.server." + deviceKey)
-            ?? defaults.string(forKey: "walkie.server") ?? defaultServer
+        let savedServer = defaults.string(forKey: "walkie.server." + deviceKey)
+            ?? defaults.string(forKey: "walkie.server")
+        let trimmedServer = savedServer?.trimmingCharacters(in: .whitespacesAndNewlines)
+        authRequired = AppConfigStore.load(Config.self, for: "walkie")?.authRequired == true
+        serverAddress = trimmedServer.flatMap { $0.isEmpty ? nil : $0 }
+            ?? Self.configuredServer()
         room = defaults.string(forKey: "walkie.room." + deviceKey)
             ?? defaults.string(forKey: "walkie.room") ?? "local"
         // ⚠ 服务器地址 / 房间 / 口令 / 昵称**每台一份**。
@@ -549,8 +554,14 @@ final class WalkieClient {
 
     private func connectLocked() {
         guard snapshot.installed, socket == nil else { return }
-        guard let url = normalizedURL(serverAddress) else {
-            snapshot.status = "服务器地址无效"
+        if authRequired && sharedToken.isEmpty {
+            snapshot.status = "请在设置中填写共享口令"
+            publish()
+            return
+        }
+        guard let url = Self.normalizedURL(serverAddress) else {
+            snapshot.status = serverAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? "请在设置中填写服务器地址" : "服务器地址无效"
             publish()
             return
         }
@@ -949,17 +960,32 @@ final class WalkieClient {
         onSnapshot?(value)
     }
 
-    private func normalizedURL(_ raw: String) -> URL? {
+    static func normalizedURL(_ raw: String) -> URL? {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.isEmpty { return nil }
-        if !text.contains("://") { text = "ws://" + text }
+        let suppliedScheme = text.contains("://")
+        if !suppliedScheme { text = "ws://" + text }
         guard var components = URLComponents(string: text) else { return nil }
         if components.scheme == "http" { components.scheme = "ws" }
         if components.scheme == "https" { components.scheme = "wss" }
         guard components.scheme == "ws" || components.scheme == "wss" else { return nil }
+        guard let host = components.host, !host.isEmpty else { return nil }
+        if !suppliedScheme && components.port == nil { components.port = 8787 }
         if components.path.isEmpty || components.path == "/" {
             components.path = "/v1/ws"
         }
         return components.url
+    }
+
+    private static func configuredServer() -> String {
+        if let config = AppConfigStore.load(Config.self, for: "walkie"),
+           let url = normalizedURL(config.server) {
+            return url.absoluteString
+        }
+        #if os(macOS)
+        return "ws://127.0.0.1:8787/v1/ws"
+        #else
+        return ""
+        #endif
     }
 }

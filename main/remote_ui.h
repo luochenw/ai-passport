@@ -21,6 +21,7 @@
 //   T<标题>              顶部标题
 //   L<文本>              一行正文
 //   B<百分比>|<标签>     一条进度条(百分比 0..100)
+//   S<行号>|<样式>       修饰已存在的正文行(body/accent/secondary)
 //   H<提示>              底部按键提示
 //   M<0|1>               这一屏收不收语音输入(1 = 长按下键说话)
 //   W<0|1>               实时对讲模式(1 = DOWN 按下/抬起原样回传)
@@ -34,11 +35,12 @@
 // 为了加一种元素就得同步改协议版本号;出问题时抓包也直接能看懂。真正需要
 // 压榨带宽的是固件传输那条路径,那边才用二进制。
 //
-// 未识别的行类型直接忽略 —— 这样对端将来加新元素时,老固件不会崩,只是
-// 显示不出新东西。
+// S 是可选的附加元数据。对端总会先发原有 L/B 内容，因此老固件忽略 S 后仍
+// 能显示完整正文，只是统一使用默认颜色。其余未识别行也直接忽略。
 #pragma once
 
 #include "bsp_button.h"
+#include "remote_row_style.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -65,6 +67,7 @@ typedef enum {
 
 typedef struct {
     remote_row_kind_t kind;
+    remote_row_style_t style;
     char text[REMOTE_UI_TEXT_LEN];
     int  percent;              // 仅 REMOTE_ROW_BAR 有意义
 } remote_row_t;
@@ -125,3 +128,7 @@ uint32_t remote_ui_manifest_revision(void);
 // "应用商店"那一项。
 #define REMOTE_UI_OPEN_STORE 0xFE
 void remote_ui_open_app(uint8_t index);
+
+// 请求配套 app 卸载首屏第 index 个应用。设备不先改自己的 NVS 缓存；配套
+// app 完成卸载后会按既有 MANIFEST 通道回推权威清单，避免两端状态分叉。
+void remote_ui_uninstall_app(uint8_t index);

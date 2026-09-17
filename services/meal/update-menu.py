@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -16,8 +17,8 @@ def main() -> int:
     parser.add_argument("menu", type=Path, help="weekly menu JSON file")
     parser.add_argument(
         "--server",
-        default="http://127.0.0.1:8787",
-        help="local companion service base URL",
+        default="http://127.0.0.1:8788",
+        help="local ByteDance Canteen service base URL",
     )
     args = parser.parse_args()
 

@@ -5,6 +5,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP="build/FoloCodexRelay.app"
+python3 ../tools/update_firmware_catalog.py --check \
+    --firmware AppCatalog/current-firmware.bin \
+    --catalog AppCatalog/catalog.json
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp FoloCodexRelay/Info.plist "$APP/Contents/Info.plist"
@@ -42,38 +45,33 @@ cp AppManifests/*.json "$APP/Contents/Resources/AppManifests/" 2>/dev/null || tr
 mkdir -p "$APP/Contents/Resources/AppCatalog"
 cp -R AppCatalog/. "$APP/Contents/Resources/AppCatalog/" 2>/dev/null || true
 
-# 应用配置**默认不进构建产物**。
-#
-# 以前这一步是无条件的:把 ~/.folotoy/*.json 全部拷进 Contents/Resources。
-# 理由是 iOS 沙盒里没有家目录,bundle 是唯一两端都成立的位置。代价是口令
-# 躺在产物里,那个 .app 就再也不能发给别人 —— 而这个代价是默认承担的,
-# 谁构建谁中招。
-#
-# 现在默认不拷,产物干净、可以随便发。自己要往 iPhone 上装、需要把配置
-# 带进去的时候显式开:
+# 应用配置默认不进构建产物。显式开启时也只提取 server 字段，token 等
+# 字段不会进入 bundle，仍由应用保存到钥匙串:
 #
 #     FOLO_BUNDLE_CONFIG=1 ./build.sh
 #
 # macOS 上完全不需要开 —— 它直接读 ~/.folotoy/apps/。
 if [ "${FOLO_BUNDLE_CONFIG:-0}" = "1" ]; then
-    shopt -s nullglob
-    cfgs=("$HOME"/.folotoy/apps/*.json "$HOME"/.folotoy/*.json)
-    shopt -u nullglob
-    if [ ${#cfgs[@]} -gt 0 ]; then
-        cp "${cfgs[@]}" "$APP/Contents/Resources/" 2>/dev/null || true
-        echo "⚠ 已把应用配置打进 bundle(含口令),这个产物不要发给别人:"
-        echo "  $(printf '%s ' "${cfgs[@]##*/}")"
-    else
-        echo "FOLO_BUNDLE_CONFIG=1 但 ~/.folotoy/ 下没有 .json,什么都没打包"
-    fi
+    python3 bundle-app-configs.py "$APP/Contents/Resources"
 else
-    echo "应用配置未打包(产物干净)。要带进 iOS 构建:FOLO_BUNDLE_CONFIG=1 ./build.sh"
+    rm -f "$APP/Contents/Resources/meal.json" "$APP/Contents/Resources/walkie.json"
+    echo "应用服务地址未打包。需要时用 FOLO_BUNDLE_CONFIG=1 ./build.sh"
 fi
 
 # 用本机已有的本地签名身份签名,而不是让 swiftc 默认落到 adhoc(每次编译哈希都变,
 # 每次都要重新过一遍蓝牙授权)。这个身份是这台机器上已经建立并信任过的(之前给
 # FloatingClock 项目用的那个),只是复用,不改任何系统信任设置。
-codesign --force --sign "FloatingClock Dev" --identifier com.folotoy.codexrelay "$APP"
+# A checkout must also build on a Mac without that personal certificate.
+# Explicit identities remain strict; otherwise use local ad-hoc signing.
+sign_identity="${FOLO_CODESIGN_IDENTITY:-}"
+if [[ -z "$sign_identity" ]]; then
+    if security find-identity -v -p codesigning | grep -Fq '"FloatingClock Dev"'; then
+        sign_identity="FloatingClock Dev"
+    else
+        sign_identity="-"
+    fi
+fi
+codesign --force --sign "$sign_identity" --identifier com.folotoy.codexrelay "$APP"
 
 echo "构建完成: $APP"
 echo "启动: open $APP"

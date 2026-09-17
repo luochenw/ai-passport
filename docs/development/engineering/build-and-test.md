@@ -34,6 +34,18 @@ The tracked `dependencies.lock` pins Managed Component resolution. After changin
 
 Firmware validation uses a fresh temporary build directory and an isolated `sdkconfig` generated from the tracked defaults. It does not consume or overwrite a developer's root `sdkconfig`, and it copies only the verified merged image to `build/FoloToy-AI-Passport-full.bin`. The gate also enforces the [mini-program BLE compatibility contract](ble-recovery-compatibility.md): protected partition addresses, application size, partition-table MD5, absence of protected payload data, and the Recovery bootloader hook.
 
+The root `VERSION` file is the firmware version source of truth. Normal local
+and branch builds embed `<version>-dev+g<short-sha>` (plus `.dirty` when the
+worktree has changes) in `esp_app_desc_t`. Release builds set
+`FOLO_FIRMWARE_RELEASE=1` and embed the clean version. Validation emits both the
+stable `FoloToy-AI-Passport-full.bin` alias and a
+`FoloToy-AI-Passport-v<resolved-version>-full.bin` artifact, then updates the
+companion's `AppCatalog/catalog.json` version, byte size, and SHA-256 from the
+exact app image copied into the catalog.
+The macOS, scripted iOS, and generated Xcode build paths validate that bundled
+image against the catalog before packaging, so a clean checkout must build the
+firmware once before building a companion app with firmware-update support.
+
 The baseline also has a hardware-independent logic test:
 
 ```bash

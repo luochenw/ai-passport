@@ -8,6 +8,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 typedef enum {
     APPSTORE_TRANSFER_OFF = 0,
@@ -38,6 +39,12 @@ const char *appstore_transfer_app_text(int index);
 // 发起安装(index 是目录里的下标),内部会重置进度并向 Mac 发 REQ_INSTALL_APP。
 void appstore_transfer_install(int index);
 bool appstore_transfer_is_installing(void);
+// True only while an OTA handle/session is active or transitioning. Unlike
+// is_installing(), a dismissed/undismissed historical error is not busy I/O.
+bool appstore_transfer_is_active(void);
+// During a resumable OTA, only the bonded peer that started it may reconnect.
+// Returns true when no OTA owns the channel or the supplied peer is that owner.
+bool appstore_transfer_peer_can_resume(uint8_t addr_type, const uint8_t addr[6]);
 int  appstore_transfer_install_received(void);   // 已经真正写完的分片数
 int  appstore_transfer_install_total(void);
 

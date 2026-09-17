@@ -129,6 +129,7 @@ The computer pushes plain text, one element per line:
 T<title>              top title
 L<text>               one line of body text
 B<percent>|<label>    a progress bar (0..100)
+S<row>|<style>        optional row color (body/accent/secondary)
 H<hint>               bottom key hint
 M<0|1>                does this screen accept voice input
 ```
@@ -138,6 +139,7 @@ M<0|1>                does this screen accept voice input
 ```swift
 var s = Screen()
 s.title = "Server"
+s.text("Overview", style: .accent)
 s.text("CPU 12%   RAM 4.2G")
 s.bar("Disk", percent: 78)
 s.spacer()
@@ -145,6 +147,10 @@ s.footer = "up/down page   OK refresh"
 ```
 
 `Screen` handles newline and pipe escaping for you — hand-built strings drop those easily, and that class of bug shows up on the device as "one line mysteriously doesn't appear".
+
+Styled text keeps its original `L` row and adds optional `S` metadata. Older
+firmware ignores `S` and still shows the complete text in the default color;
+newer firmware also accepts screens that omit `S`.
 
 **Unrecognized line types are ignored by the device**, never fatal. So when new element types are added later, old firmware simply doesn't show them instead of crashing.
 

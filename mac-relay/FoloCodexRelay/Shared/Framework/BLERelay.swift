@@ -1,5 +1,6 @@
 import Foundation
 import CoreBluetooth
+import Security
 #if os(iOS)
 import UIKit
 #endif
@@ -8,6 +9,76 @@ import UIKit
 // 分不开,没法谈三端复用。
 
 // MARK: - BLE Relay
+
+/// Passport 认证服务的当前快照。这里的 companion id 是安装实例的稳定元数据；
+/// 真正的连接身份仍由系统 BLE bond 决定，不能拿这个字符串替代配对密钥。
+struct CompanionAuthSnapshot: Equatable {
+    struct TrustedCompanion: Identifiable, Equatable {
+        let id: String
+        let platform: UInt8
+        let name: String
+
+        var platformName: String {
+            switch platform {
+            case 1: return "iPhone / iPad"
+            case 2: return "Mac"
+            default: return "未知平台"
+            }
+        }
+    }
+
+    var protocolVersion = 0
+    var state = "disconnected"
+    var deviceID = ""
+    var alias = ""
+    var currentID = ""
+    var currentPlatform: UInt8 = 0
+    var currentName = ""
+    var currentAppVersion = ""
+    var pairingRemaining = 0
+    var trustedCount = 0
+    var handoffTarget = ""
+    var handoffRemaining = 0
+    var retryAfter = 0
+    var reason = ""
+    var trusted: [TrustedCompanion] = []
+
+    var authorized: Bool { state == "authorized" }
+
+    var statusText: String {
+        switch state {
+        case "authorized": return "已认证"
+        case "awaiting_confirmation":
+            return reason == "retrust_confirmation"
+                ? "请在 Passport 上确认重新信任"
+                : "请在 Passport 和系统配对提示中确认"
+        case "pairing": return "正在建立安全连接…"
+        case "connected": return "正在识别设备…"
+        case "denied":
+            switch reason {
+            case "pairing_window_closed": return "Passport 未开启配对发现"
+            case "handoff_target_mismatch": return "Passport 正在切换到另一台设备"
+            case "enrollment_reserved": return "Passport 正在等待一台新设备"
+            case "ota_owned_by_another_companion": return "另一台设备正在续传固件"
+            case "companion_identity_changed": return "此 App 身份已变化，请在 Passport 重新开启配对发现"
+            case "user_rejected": return "Passport 已拒绝连接"
+            case "trust_store_full": return "Passport 的已配对设备已满"
+            case "legacy_client", "legacy_client_backoff":
+                return "检测到旧版 App，Passport 已暂时释放连接"
+            case "manual_disconnect": return "已在 Passport 上断开，等待重新选择"
+            case "handoff", "yield": return "Passport 正在切换蓝牙设备"
+            case "hello_timeout": return "认证握手超时，请稍后重试"
+            case "repairing_system_bond": return "正在更新旧的系统蓝牙配对…"
+            case "stale_system_bond": return "请先在系统蓝牙设置中忽略此 Passport，再重新添加"
+            case "current_companion_forgotten", "all_companions_forgotten":
+                return "已被 Passport 忘记，请在 Passport 上重新开启配对发现"
+            case "trusted_companion_forgotten": return "已忘记所选设备"
+            default: return "连接未获授权"
+            }
+        default: return "未认证"
+        }
+    }
+}
 
 /// Scans for "FoloPassport", connects, discovers the Codex Relay service's two
 /// characteristics (DATA for Mac->device pushes, CMD for device->Mac requests),
@@ -23,6 +94,12 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     static let namePrefix = "FoloPassport"
     /// 老固件(没有后缀)也要能连上,所以前缀本身就是合法名字。
     static let targetName = namePrefix
+    // Companion authentication service (main/device_trust.c). The companion must
+    // finish this service before it discovers any feature service.
+    static let authServiceUUID = CBUUID(string: "4F6C6F10-7E2A-4C59-A4B1-3D8E91C72A00")
+    static let authHelloCharUUID = CBUUID(string: "4F6C6F10-7E2A-4C59-A4B1-3D8E91C72A01")
+    static let authStateCharUUID = CBUUID(string: "4F6C6F10-7E2A-4C59-A4B1-3D8E91C72A02")
+    static let authCommandCharUUID = CBUUID(string: "4F6C6F10-7E2A-4C59-A4B1-3D8E91C72A03")
     // NOTE: on the Swift/CoreBluetooth side we use the UUID strings exactly as given in
     // the spec (standard order) -- the firmware-side BLE_UUID128_INIT byte reversal is a
     // firmware-only concern and does not apply here.
@@ -92,6 +169,10 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         var rssi: Int
         var lastSeen: Date
         var connected: Bool
+        var authState: String
+        var authStatusText: String
+        var alias: String
+        var authorized: Bool
         /// 界面此刻**正在看**哪一台。跟 connected 是两回事,也跟"能不能用"
         /// 无关 —— 每台都有自己独立的会话,都在跑;这个标志只说明屏幕上
         /// 显示的是谁的那一份。
@@ -106,6 +187,85 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     /// 还没被释放的 CBPeripheral 引用 —— CoreBluetooth 要求调用方自己持有,
     /// 不持有的话对象会被回收,之后 connect(_:) 直接失败。
     private var knownPeripherals: [UUID: CBPeripheral] = [:]
+    /// 只给曾经成功认证过的 CoreBluetooth 外设自动重连。陌生 Passport 会显示
+    /// 在列表里，但必须由用户点一次；附近别人的设备不会被这个 App 抢占。
+    private static let authorizedPeripheralsKey = "ble.authorizedPeripherals.v1"
+    private var authorizedPeripheralIDs: Set<UUID> = Set(
+        UserDefaults.standard.stringArray(forKey: authorizedPeripheralsKey)?
+            .compactMap(UUID.init(uuidString:)) ?? []
+    )
+    /// 明确被固件拒绝后不循环重连。用户再次点设备时才解除。
+    private var deniedIDs: Set<UUID> = []
+    /// yield / handoff 通知给出的退避截止时间。旧端在这段时间内不能抢回单连接。
+    private var reconnectNotBefore: [UUID: Date] = [:]
+    /// CoreBluetooth 的 AutoReconnect 有时会在 App 重启后恢复成一个永远没有
+    /// didConnect/didFail 回调的 `.connecting`。用 token 让每台最多只有一条
+    /// 恢复看门狗；新的回调会撤销旧定时器，避免 cancel/connect 互相打架。
+    private var reconnectRecoveryTokens: [UUID: UInt64] = [:]
+    private var nextReconnectRecoveryToken: UInt64 = 0
+    /// A restored transport can claim `.connected` while GATT discovery never calls
+    /// back. Bound only the setup phase; once HELLO is sent, the firmware owns the
+    /// pairing/confirmation timeout and the user may take as long as needed.
+    private var authSetupTokens: [UUID: UInt64] = [:]
+
+    private struct CompanionIdentity {
+        let id: String
+        let platform: UInt8
+        let appVersion: String
+
+        private static let service = "com.folotoy.codexrelay.companion-auth"
+        private static let account = "installation-id.v1"
+        private static let installMarker = "auth.installation-id-created.v1"
+
+        static func loadOrCreate() -> CompanionIdentity {
+            let base: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: account,
+            ]
+            // iOS 卸载 App 会清 UserDefaults，但钥匙串默认仍保留。用一个非敏感
+            // 安装标记区分“升级/重启”和“重新安装”，确保新安装得到新身份。
+            let defaults = UserDefaults.standard
+            if !defaults.bool(forKey: installMarker) {
+                SecItemDelete(base as CFDictionary)
+            }
+            var query = base
+            query[kSecReturnData as String] = true
+            query[kSecMatchLimit as String] = kSecMatchLimitOne
+            var item: CFTypeRef?
+            let stored: String?
+            if SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+               let data = item as? Data {
+                stored = String(data: data, encoding: .utf8)
+            } else {
+                stored = nil
+            }
+
+            let id = stored.flatMap { $0.isEmpty ? nil : $0 } ?? UUID().uuidString.lowercased()
+            if stored == nil, let data = id.data(using: .utf8) {
+                var add = base
+                add[kSecValueData as String] = data
+                add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+                let rc = SecItemAdd(add as CFDictionary, nil)
+                if rc != errSecSuccess {
+                    // 只记录状态码。id 不是权限凭证，但也没必要把稳定标识写进日志。
+                    log("[auth] 安装身份写入钥匙串失败 status=\(rc)，本次运行仍可连接")
+                }
+            }
+            defaults.set(true, forKey: installMarker)
+
+            #if os(iOS)
+            let platform: UInt8 = 1
+            #else
+            let platform: UInt8 = 2
+            #endif
+            let version = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
+                ?? "dev"
+            return CompanionIdentity(id: id, platform: platform, appVersion: version)
+        }
+    }
+
+    private let companionIdentity = CompanionIdentity.loadOrCreate()
     /// 用户选定要连的那一台。nil = 没选过,连扫到的第一台。
     ///
     /// 落 UserDefaults:不存的话每次重启都连"扫到的第一台",而扫描顺序取决于
@@ -134,6 +294,16 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         let id: UUID
         let peripheral: CBPeripheral
 
+        var authHelloChar: CBCharacteristic?
+        var authStateChar: CBCharacteristic?
+        var authCommandChar: CBCharacteristic?
+        var authRxBuffer = ""
+        var auth = CompanionAuthSnapshot(state: "connecting")
+        var authHelloSent = false
+        var trustedRefreshRequested = false
+        var businessDiscoveryStarted = false
+        var authorized = false
+
         var audioChar: CBCharacteristic?
         var appStoreDataChar: CBCharacteristic?
         var appStoreCmdChar: CBCharacteristic?
@@ -153,6 +323,10 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         /// 时会硬切 —— 不能假设"一个通知就是若干条完整的行",必须自己攒到看见
         /// 换行为止,否则 SSID 长一点的那条状态会被拆成两半各自解析失败。
         var statusRxBuffer = ""
+        /// 会话建好前 STATUS 就可能先到。保存适合回放的最新标量状态，attach
+        /// 后补给 DeviceSession，避免 `firmware.version` 等一次性快照丢失。
+        /// Wi-Fi 扫描结果是 begin/item/end 流，不能压成字典，故不放这里。
+        var cachedDeviceStatus: [String: String] = [:]
 
         /// 这台此刻是不是停在某个远程应用里(而不是自己的本地菜单)。
         /// 推屏按它分发:在同一个应用里的设备都该看到同一屏 —— 上层
@@ -246,6 +420,8 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
     /// 设备上报的状态,已经拆成键值对。
     var onDeviceStatus: ((UUID, [(String, String)]) -> Void)?
+    /// 认证状态变化。可能发生在业务会话建立之前，所以设备条和等待页也会消费它。
+    var onAuthState: ((UUID, CompanionAuthSnapshot) -> Void)?
     /// 连接状态变化。第二个参数是设备名(断开时为 nil)。
     ///
     /// ⚠ 这条只表达**链路**通没通,不再兼职表达"界面焦点变了"。以前
@@ -375,6 +551,250 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         return result
     }
 
+    // MARK: Companion authentication
+
+    private static func boundedUTF8(_ value: String, maxBytes: Int) -> Data {
+        var out = Data()
+        for character in value {
+            guard let bytes = String(character).data(using: .utf8),
+                  out.count + bytes.count <= maxBytes else { break }
+            out.append(bytes)
+        }
+        return out
+    }
+
+    private func helloPayload() -> Data {
+        let id = Self.boundedUTF8(companionIdentity.id, maxBytes: 64)
+        // Read on every HELLO so an edited installation name is also used by
+        // subsequent reconnects and by every Passport this installation owns.
+        let name = Self.boundedUTF8(CompanionNamePolicy.load(),
+                                    maxBytes: CompanionNamePolicy.maxUTF8Bytes)
+        let version = Self.boundedUTF8(companionIdentity.appVersion, maxBytes: 24)
+        var result = Data([1, UInt8(id.count), companionIdentity.platform,
+                           UInt8(name.count), UInt8(version.count)])
+        result.append(id)
+        result.append(name)
+        result.append(version)
+        return result
+    }
+
+    private func sendHello(on link: DeviceLink) {
+        guard !link.authHelloSent, let chr = link.authHelloChar,
+              link.authStateChar?.isNotifying == true else { return }
+        authSetupTokens.removeValue(forKey: link.id)
+        link.authHelloSent = true
+        link.peripheral.writeValue(helloPayload(), for: chr, type: .withResponse)
+        log("[auth] 已发送伴侣信息，等待 Passport 确认")
+    }
+
+    private func persistAuthorizedPeripheralIDs() {
+        UserDefaults.standard.set(authorizedPeripheralIDs.map(\.uuidString).sorted(),
+                                  forKey: Self.authorizedPeripheralsKey)
+    }
+
+    private func markAuthorized(_ link: DeviceLink) {
+        guard !link.authorized else { return }
+        link.authorized = true
+        deniedIDs.remove(link.id)
+        reconnectNotBefore.removeValue(forKey: link.id)
+        authorizedPeripheralIDs.insert(link.id)
+        persistAuthorizedPeripheralIDs()
+        requestTrustedList(on: link)
+        if !link.businessDiscoveryStarted {
+            link.businessDiscoveryStarted = true
+            log("[auth] Passport 已授权，开始发现业务服务")
+            link.peripheral.discoverServices(nil)
+        }
+    }
+
+    /// 0x07 是可靠全量补读：固件清空旧通知队列，排队发送快照和全部
+    /// `trusted=` 行，并按 NOTIFY_TX/ENOMEM 逐帧推进。请求前清掉本地旧项，
+    /// 否则另一端已删除的伴侣会永远残留在列表里。
+    private func requestTrustedList(on link: DeviceLink) {
+        guard link.authorized, !link.trustedRefreshRequested,
+              let chr = link.authCommandChar else { return }
+        link.trustedRefreshRequested = true
+        link.auth.trusted = []
+        link.peripheral.writeValue(Data([0x07]), for: chr, type: .withResponse)
+    }
+
+    private func consumeAuthData(_ data: Data, on link: DeviceLink) {
+        guard let text = String(data: data, encoding: .utf8) else {
+            log("[auth] STATE 含无效 UTF-8，已忽略")
+            return
+        }
+        link.authRxBuffer += text
+        while let nl = link.authRxBuffer.firstIndex(of: "\n") {
+            let line = String(link.authRxBuffer[..<nl])
+            link.authRxBuffer = String(link.authRxBuffer[link.authRxBuffer.index(after: nl)...])
+            applyAuthLine(line, to: link)
+        }
+        if link.authRxBuffer.utf8.count > 4096 {
+            log("[auth] STATE 缓冲超长，已丢弃")
+            link.authRxBuffer = ""
+        }
+    }
+
+    private func applyAuthLine(_ line: String, to link: DeviceLink) {
+        guard let parsed = CompanionAuthStateLine.parse(line) else { return }
+        let key = parsed.key
+        let raw = parsed.rawValue
+        let value = parsed.value
+        switch key {
+        case "v": link.auth.protocolVersion = Int(value) ?? 0
+        case "state":
+            // A full firmware snapshot starts with `state`. Clear transient
+            // timing from the previous snapshot before its new timing fields
+            // arrive, otherwise an old handoff reason can recreate a cooldown
+            // after a successful authorization.
+            link.auth.reason = ""
+            link.auth.retryAfter = 0
+            link.auth.handoffRemaining = 0
+            link.auth.pairingRemaining = 0
+            link.auth.state = value
+            if value == "authorized" {
+                markAuthorized(link)
+            } else if value == "denied" {
+                link.authorized = false
+            }
+        case "id": link.auth.deviceID = value
+        case "alias": link.auth.alias = value
+        case "current.id": link.auth.currentID = value
+        case "current.platform": link.auth.currentPlatform = UInt8(value) ?? 0
+        case "current.name": link.auth.currentName = value
+        case "current.app": link.auth.currentAppVersion = value
+        case "pairing.remaining": link.auth.pairingRemaining = Int(value) ?? 0
+        case "trusted.count":
+            let previousCount = link.auth.trustedCount
+            link.auth.trustedCount = Int(value) ?? 0
+            if link.auth.trustedCount == 0 {
+                link.auth.trusted = []
+                link.trustedRefreshRequested = false
+            } else if link.auth.trusted.count == link.auth.trustedCount {
+                link.trustedRefreshRequested = false
+            } else if link.authorized && previousCount != link.auth.trustedCount &&
+                        !link.trustedRefreshRequested {
+                requestTrustedList(on: link)
+            }
+        case "handoff.target": link.auth.handoffTarget = value
+        case "handoff.remaining": link.auth.handoffRemaining = Int(value) ?? 0
+        case "retry_after": link.auth.retryAfter = Int(value) ?? 0
+        case "reason":
+            link.auth.reason = value
+            if value == "current_companion_forgotten" ||
+                        value == "all_companions_forgotten" ||
+                        value == "stale_system_bond" {
+                link.authorized = false
+                authorizedPeripheralIDs.remove(link.id)
+                deniedIDs.insert(link.id)
+                persistAuthorizedPeripheralIDs()
+            } else if value == "pairing_window_closed" ||
+                        value == "companion_identity_changed" ||
+                        value == "user_rejected" || value == "trust_store_full" {
+                // Passport 已经明确表示这台伴侣不能无感恢复；撤掉本机的自动连接
+                // 资格，避免重启 App 后再次循环占用设备。用户手动点选仍可重试。
+                authorizedPeripheralIDs.remove(link.id)
+                deniedIDs.insert(link.id)
+                persistAuthorizedPeripheralIDs()
+            }
+        case "trusted":
+            let fields = raw.components(separatedBy: "\t")
+            guard fields.count >= 3 else { break }
+            let companion = CompanionAuthSnapshot.TrustedCompanion(
+                id: fields[0].removingPercentEncoding ?? fields[0],
+                platform: UInt8(fields[1]) ?? 0,
+                name: fields[2].removingPercentEncoding ?? fields[2])
+            if let index = link.auth.trusted.firstIndex(where: { $0.id == companion.id }) {
+                link.auth.trusted[index] = companion
+            } else {
+                link.auth.trusted.append(companion)
+            }
+            if link.auth.trusted.count >= link.auth.trustedCount {
+                link.trustedRefreshRequested = false
+            }
+        default: break
+        }
+        if key == "reason" || key == "retry_after" ||
+            key == "handoff.remaining" || key == "pairing.remaining",
+           let delay = BLERelayReconnectPolicy.temporaryBackoff(
+               reason: link.auth.reason,
+               retryAfter: link.auth.retryAfter,
+               handoffRemaining: link.auth.handoffRemaining,
+               pairingRemaining: link.auth.pairingRemaining) {
+            // Temporary selection/busy outcomes keep their automatic recovery
+            // eligibility. Re-evaluate on every timing field so STATE line order
+            // cannot shorten a 60-second targeted handoff to the 10-second floor.
+            deniedIDs.remove(link.id)
+            let deadline = Date().addingTimeInterval(delay)
+            reconnectNotBefore[link.id] = max(
+                reconnectNotBefore[link.id] ?? .distantPast, deadline)
+        }
+        publishAuth(link)
+    }
+
+    private func publishAuth(_ link: DeviceLink) {
+        if discovered[link.id] == nil {
+            discovered[link.id] = DiscoveredDevice(
+                id: link.id, name: link.peripheral.name ?? Self.namePrefix, rssi: 0,
+                lastSeen: Date(), connected: link.peripheral.state == .connected,
+                authState: link.auth.state, authStatusText: link.auth.statusText,
+                alias: link.auth.alias, authorized: link.authorized,
+                displayed: displayedID == link.id)
+        } else {
+            discovered[link.id]?.authState = link.auth.state
+            discovered[link.id]?.authStatusText = link.auth.statusText
+            discovered[link.id]?.alias = link.auth.alias
+            discovered[link.id]?.authorized = link.authorized
+        }
+        publishDevices(force: true)
+        onAuthState?(link.id, link.auth)
+    }
+
+    /// 供新建的 DeviceSession 取得认证完成后已经收齐的初始快照。
+    func authSnapshot(for device: UUID) -> CompanionAuthSnapshot? {
+        var result: CompanionAuthSnapshot?
+        bleQueue.sync { result = links[device]?.auth }
+        return result
+    }
+
+    /// COMMAND: 0x01 alias, 0x03 forget, 0x04 forget-all, 0x05 handoff,
+    /// 0x06 yield, 0x08 update this companion's name.
+    /// 没有“远程开启添加窗口”入口；0x02 被固件明确拒绝，伴侣端也不暴露。
+    func sendAuthCommand(_ operation: UInt8, value: String = "", to device: UUID,
+                         completion: @escaping (Bool) -> Void = { _ in }) {
+        bleQueue.async { [weak self] in
+            guard let self, let link = self.links[device], link.authorized,
+                  let chr = link.authCommandChar else {
+                completion(false)
+                return
+            }
+            // Never silently truncate a command. In particular, 0x08 validates
+            // the complete edited UTF-8 name before it can reach persistence.
+            guard let payload = CompanionAuthCommandWire.payload(operation: operation,
+                                                                  value: value) else {
+                completion(false)
+                return
+            }
+            if operation == 0x06 {
+                self.reconnectNotBefore[device] = Date().addingTimeInterval(10)
+            } else if operation == 0x04 || (operation == 0x03 && value == self.companionIdentity.id) {
+                self.authorizedPeripheralIDs.remove(device)
+                self.persistAuthorizedPeripheralIDs()
+            }
+            if operation == 0x03 {
+                link.auth.trusted.removeAll { $0.id == value }
+                link.auth.trustedCount = link.auth.trusted.count
+                self.publishAuth(link)
+            } else if operation == 0x04 {
+                link.auth.trusted = []
+                link.auth.trustedCount = 0
+                self.publishAuth(link)
+            }
+            link.peripheral.writeValue(payload, for: chr, type: .withResponse)
+            completion(true)
+        }
+    }
+
     // MARK: Connection lifecycle
 
     private func startScanIfNeeded() {
@@ -416,6 +836,170 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         let options: [String: Any]? = [CBCentralManagerScanOptionAllowDuplicatesKey: true]
         #endif
         central.scanForPeripherals(withServices: services, options: options)
+    }
+
+    /// Ask CoreBluetooth for peripherals this installation has already authenticated,
+    /// then leave a connection request pending for each one. A pending request lets iOS
+    /// connect when a powered-off Passport starts advertising again without requiring
+    /// the user to foreground this app first. This is still subject to iOS background
+    /// execution policy; a user force-quit explicitly suppresses Bluetooth relaunch.
+    private func reconnectRememberedPeripherals() {
+        guard central != nil, central.state == .poweredOn,
+              !authorizedPeripheralIDs.isEmpty else { return }
+        let remembered = central.retrievePeripherals(
+            withIdentifiers: Array(authorizedPeripheralIDs))
+        for peripheral in remembered {
+            log("取回已认证 BLE 外设 id=\(peripheral.identifier) state=\(peripheral.state.rawValue)")
+            knownPeripherals[peripheral.identifier] = peripheral
+            if discovered[peripheral.identifier] == nil {
+                discovered[peripheral.identifier] = DiscoveredDevice(
+                    id: peripheral.identifier,
+                    name: peripheral.name ?? Self.namePrefix,
+                    rssi: 0, lastSeen: Date(), connected: peripheral.state == .connected,
+                    authState: "remembered", authStatusText: "正在自动连接",
+                    alias: "", authorized: false,
+                    displayed: displayedID == peripheral.identifier)
+            }
+            guard links[peripheral.identifier] == nil,
+                  !deniedIDs.contains(peripheral.identifier),
+                  !userDisconnectedIDs.contains(peripheral.identifier),
+                  reconnectRecoveryTokens[peripheral.identifier] == nil else { continue }
+            if (reconnectNotBefore[peripheral.identifier] ?? .distantPast) > Date() {
+                scheduleReconnect(to: peripheral)
+            } else {
+                recoverPeripheral(peripheral, source: "retrieve")
+            }
+        }
+        if displayedID == nil { displayedID = remembered.first?.identifier }
+        if !remembered.isEmpty { publishDevices(force: true) }
+    }
+
+    private func recoveredState(of peripheral: CBPeripheral) -> BLERelayRecoveredPeripheralState {
+        switch peripheral.state {
+        case .disconnected: return .disconnected
+        case .connecting: return .connecting
+        case .connected: return .connected
+        case .disconnecting: return .disconnecting
+        @unknown default: return .disconnected
+        }
+    }
+
+    /// Re-enter a peripheral returned by state restoration/retrieval. A pending
+    /// connection inherited from an earlier process has no useful age, and field logs
+    /// show it can remain `.connecting` forever without any delegate callback. Cancel
+    /// that stale request once, then create a fresh request which still carries Apple's
+    /// AutoReconnect option.
+    private func recoverPeripheral(_ peripheral: CBPeripheral, source: String) {
+        let wasAuthorized = authorizedPeripheralIDs.contains(peripheral.identifier)
+        switch BLERelayReconnectPolicy.recoveredAction(
+            state: recoveredState(of: peripheral), wasAuthorized: wasAuthorized) {
+        case .authenticate:
+            reconnectRecoveryTokens.removeValue(forKey: peripheral.identifier)
+            let link = links[peripheral.identifier] ?? DeviceLink(peripheral: peripheral)
+            links[peripheral.identifier] = link
+            beginAuthenticationSetup(link, source: source)
+        case .restartPendingConnection:
+            restartPendingSystemConnection(peripheral, source: source)
+        case .connect:
+            links.removeValue(forKey: peripheral.identifier)
+            connectLocked(peripheral)
+        case .discard:
+            links.removeValue(forKey: peripheral.identifier)
+            if peripheral.state != .disconnected {
+                central.cancelPeripheralConnection(peripheral)
+            }
+        }
+    }
+
+    private func beginAuthenticationSetup(_ link: DeviceLink, source: String) {
+        nextReconnectRecoveryToken &+= 1
+        let token = nextReconnectRecoveryToken
+        authSetupTokens[link.id] = token
+        link.peripheral.delegate = self
+        link.peripheral.discoverServices([Self.authServiceUUID])
+        bleQueue.asyncAfter(deadline: .now() + BLERelayReconnectPolicy.freshSystemAttemptGrace) {
+            [weak self, weak link] in
+            guard let self, let link,
+                  self.authSetupTokens[link.id] == token,
+                  self.links[link.id] === link,
+                  !link.authHelloSent else { return }
+            self.authSetupTokens.removeValue(forKey: link.id)
+            log("认证服务发现超时，刷新连接 source=\(source) id=\(link.id)")
+            self.restartPendingSystemConnection(link.peripheral,
+                                                source: "auth-setup-timeout")
+        }
+    }
+
+    private func restartPendingSystemConnection(_ peripheral: CBPeripheral, source: String) {
+        let id = peripheral.identifier
+        let backoff = (reconnectNotBefore[id] ?? .distantPast).timeIntervalSinceNow
+        guard BLERelayReconnectPolicy.mayRetry(
+            wasAuthorized: authorizedPeripheralIDs.contains(id),
+            denied: deniedIDs.contains(id),
+            userDisconnected: userDisconnectedIDs.contains(id),
+            backoffRemaining: backoff) else {
+            links.removeValue(forKey: id)
+            central.cancelPeripheralConnection(peripheral)
+            return
+        }
+
+        nextReconnectRecoveryToken &+= 1
+        let token = nextReconnectRecoveryToken
+        reconnectRecoveryTokens[id] = token
+        links.removeValue(forKey: id)
+        discovered[id]?.connected = false
+        discovered[id]?.authorized = false
+        discovered[id]?.authState = "disconnected"
+        discovered[id]?.authStatusText = "正在刷新自动连接…"
+        publishDevices(force: true)
+        log("重置没有回调的系统自动连接 source=\(source) id=\(id)")
+        central.cancelPeripheralConnection(peripheral)
+        finishPendingSystemConnectionReset(peripheral, token: token, remainingChecks: 2)
+    }
+
+    private func finishPendingSystemConnectionReset(_ peripheral: CBPeripheral,
+                                                     token: UInt64,
+                                                     remainingChecks: Int) {
+        bleQueue.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self,
+                  self.reconnectRecoveryTokens[peripheral.identifier] == token else { return }
+            if peripheral.state == .disconnected {
+                self.reconnectRecoveryTokens.removeValue(forKey: peripheral.identifier)
+                self.connectLocked(peripheral)
+            } else if peripheral.state == .connected {
+                self.reconnectRecoveryTokens.removeValue(forKey: peripheral.identifier)
+                self.recoverPeripheral(peripheral, source: "reset-completed")
+            } else if remainingChecks > 0 {
+                self.central.cancelPeripheralConnection(peripheral)
+                self.finishPendingSystemConnectionReset(
+                    peripheral, token: token, remainingChecks: remainingChecks - 1)
+            } else {
+                // Bounded recovery: never leave the UI claiming an attempt is in flight
+                // forever. A tap can start this reset path again if CoreBluetooth later
+                // releases the peripheral.
+                self.reconnectRecoveryTokens.removeValue(forKey: peripheral.identifier)
+                self.discovered[peripheral.identifier]?.authStatusText =
+                    "自动连接未完成，请点击重试"
+                self.publishDevices(force: true)
+                log("系统自动连接仍未释放，停止本轮恢复 id=\(peripheral.identifier)")
+            }
+        }
+    }
+
+    private func armFreshSystemReconnectWatchdog(_ peripheral: CBPeripheral) {
+        nextReconnectRecoveryToken &+= 1
+        let token = nextReconnectRecoveryToken
+        reconnectRecoveryTokens[peripheral.identifier] = token
+        discovered[peripheral.identifier]?.authStatusText = "正在自动重连…"
+        publishDevices(force: true)
+        bleQueue.asyncAfter(deadline: .now() + BLERelayReconnectPolicy.freshSystemAttemptGrace) {
+            [weak self] in
+            guard let self,
+                  self.reconnectRecoveryTokens[peripheral.identifier] == token,
+                  self.links[peripheral.identifier] == nil else { return }
+            self.reconnectRecoveryTokens.removeValue(forKey: peripheral.identifier)
+            self.recoverPeripheral(peripheral, source: "auto-reconnect-timeout")
+        }
     }
 
     /// 大块传输期间别扫描。
@@ -461,7 +1045,9 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     private func scheduleReconnect(to target: CBPeripheral) {
-        bleQueue.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+        let earliest = reconnectNotBefore[target.identifier] ?? .distantPast
+        let delay = max(2.0, earliest.timeIntervalSinceNow)
+        bleQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self = self else { return }
             guard self.central.state == .poweredOn else { return } // watchdog will catch it later
             // 以前这里有两条"别抢占"的守卫,因为整个 relay 只有一套特征值
@@ -469,10 +1055,21 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             // 就是谁,守卫不再需要 —— 也正是它们让第二台永远连不上。
             // 只跳过两种情况:已经连着的,和用户主动断开过的。
             guard self.links[target.identifier] == nil else { return }
+            // 陌生设备只能由用户点选；认证过一次的 UUID 才有自动重连资格。
+            guard self.authorizedPeripheralIDs.contains(target.identifier) else { return }
+            guard !self.deniedIDs.contains(target.identifier) else {
+                log("放弃重连 \(target.identifier):Passport 已拒绝，等待用户再次选择")
+                return
+            }
             guard !self.userDisconnectedIDs.contains(target.identifier) else {
                 log("放弃重连 \(target.identifier):用户主动断开过")
                 return
             }
+            if let until = self.reconnectNotBefore[target.identifier], until > Date() {
+                self.scheduleReconnect(to: target)
+                return
+            }
+            self.reconnectNotBefore.removeValue(forKey: target.identifier)
             log("尝试重新连接 \(target.identifier) ...")
             self.connectLocked(target)
         }
@@ -482,6 +1079,9 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         log("蓝牙状态变化: \(c.state.rawValue) (5=poweredOn)")
         switch c.state {
         case .poweredOn:
+            // Do this before scanning. Retrieval is immediate for peripherals already
+            // known to CoreBluetooth, and connect() remains pending until Passport boots.
+            reconnectRememberedPeripherals()
             startScanIfNeeded()
         default:
             // Not usable right now (off/unauthorized/unsupported/resetting/unknown).
@@ -503,8 +1103,13 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             // 就告诉谁。
             let gone = Array(links.keys)
             links.removeAll()
+            reconnectRecoveryTokens.removeAll()
+            authSetupTokens.removeAll()
             for id in discovered.keys {
                 discovered[id]?.connected = false
+                discovered[id]?.authorized = false
+                discovered[id]?.authState = "disconnected"
+                discovered[id]?.authStatusText = "蓝牙不可用"
                 discovered[id]?.displayed = false
             }
             publishDevices(force: true)
@@ -545,30 +1150,49 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         if isNew { log("发现设备: \(shown) rssi=\(RSSI) id=\(p.identifier)") }
 
         knownPeripherals[p.identifier] = p     // 必须自己持有,否则会被回收
+        let previous = discovered[p.identifier]
+        let auth = links[p.identifier]?.auth
         discovered[p.identifier] = DiscoveredDevice(
             id: p.identifier, name: shown, rssi: RSSI.intValue,
-            lastSeen: Date(), connected: links[p.identifier] != nil,
+            lastSeen: Date(), connected: p.state == .connected,
+            authState: auth?.state ?? previous?.authState ?? "discovered",
+            authStatusText: auth?.statusText ?? previous?.authStatusText ?? "点按以连接",
+            alias: auth?.alias ?? previous?.alias ?? "",
+            authorized: auth?.authorized ?? false,
             displayed: displayedID == p.identifier)
         publishDevices(force: isNew)
 
-        // 扫到的每一台都连上 —— 设备侧 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1 说的
-        // 是"一台设备只接受一个 central",不是"一个 central 只能连一台设备"。
-        // 已经连着的、以及用户主动断开过的跳过。
+        // 只自动连接本机以前成功认证过的 Passport。陌生设备仍保留在列表中，
+        // 让用户明确点选后再占用它唯一的 central 槽位。
         guard links[p.identifier] == nil else { return }
+        guard authorizedPeripheralIDs.contains(p.identifier) else { return }
+        guard !deniedIDs.contains(p.identifier) else { return }
         guard !userDisconnectedIDs.contains(p.identifier) else { return }
+        guard reconnectRecoveryTokens[p.identifier] == nil else { return }
+        guard (reconnectNotBefore[p.identifier] ?? .distantPast) <= Date() else { return }
         connectLocked(p)
     }
 
     /// **必须在 bleQueue 上调。**
     private func connectLocked(_ p: CBPeripheral) {
+        guard p.state == .disconnected else {
+            log("跳过重复连接请求 id=\(p.identifier) state=\(p.state.rawValue)")
+            return
+        }
         // link 在发起连接时就建好,didConnect / 特征值发现都往它里面写。
         links[p.identifier] = links[p.identifier] ?? DeviceLink(peripheral: p)
         userDisconnectedIDs.remove(p.identifier)
         p.delegate = self
-        central.connect(p, options: [
+        var options: [String: Any] = [
             CBConnectPeripheralOptionNotifyOnConnectionKey: true,
             CBConnectPeripheralOptionNotifyOnDisconnectionKey: true,
-        ])
+        ]
+        #if os(iOS)
+        // iOS 17 can own link recovery while the app is suspended or relaunched for
+        // CoreBluetooth restoration. Explicit cancelPeripheralConnection still stops it.
+        options[CBConnectPeripheralOptionEnableAutoReconnect] = true
+        #endif
+        central.connect(p, options: options)
     }
 
     /// 把列表交给界面。开了 allowDuplicates 之后 didDiscover 每秒会来很多次,
@@ -582,7 +1206,8 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         // 扫描回调顺手记的,断开、切换活跃都不会更新它。界面上"哪台连着、
         // 哪台在被驱动"必须跟实际链路一致,否则又是在陈述自己不知道的事。
         for id in discovered.keys {
-            discovered[id]?.connected = links[id] != nil
+            discovered[id]?.connected = links[id]?.peripheral.state == .connected
+            discovered[id]?.authorized = links[id]?.authorized ?? false
             discovered[id]?.displayed = (id == displayedID)
         }
         // 30 秒没再扫到就当它走了 —— 否则列表只增不减,拔掉的设备会一直挂着。
@@ -612,40 +1237,84 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         displayedID = id
         UserDefaults.standard.set(id.uuidString, forKey: Self.lastDisplayedKey)
         bleQueue.async { [weak self] in
-            guard let self, self.links[id] == nil,
-                  let target = self.knownPeripherals[id] else { return }
+            guard let self else { return }
             // 还没连上就顺手连一下 —— 用户点它多半是想用它。
             self.userDisconnectedIDs.remove(id)
-            self.connectLocked(target)
+            self.deniedIDs.remove(id)
+            self.reconnectNotBefore.removeValue(forKey: id)
+            guard self.links[id] == nil, let target = self.knownPeripherals[id] else { return }
+            if target.state == .connecting || target.state == .disconnecting {
+                self.restartPendingSystemConnection(target, source: "user-tap")
+            } else if target.state == .connected {
+                self.recoverPeripheral(target, source: "user-tap")
+            } else {
+                self.connectLocked(target)
+            }
         }
     }
 
     func centralManager(_ c: CBCentralManager, didConnect p: CBPeripheral) {
+        reconnectRecoveryTokens.removeValue(forKey: p.identifier)
         // 每台一条 link。以前这里会把"非当前设备"直接断掉 —— 那是单设备
         // 时代的兜底,现在正是要留住它们。
         links[p.identifier] = links[p.identifier] ?? DeviceLink(peripheral: p)
         // 第一台连上时界面还没看着谁,顺手指过去;之后不再自动改 —— 换台
         // 设备上线不该把你正看着的那一页顶掉。
         if displayedID == nil { displayedID = p.identifier }
-        log("已连接 \(p.name ?? Self.namePrefix)(共 \(links.count) 台),开始发现服务...")
+        log("已连接 \(p.name ?? Self.namePrefix)(共 \(links.count) 台),开始认证...")
         discovered[p.identifier]?.connected = true
+        discovered[p.identifier]?.authState = "connected"
+        discovered[p.identifier]?.authStatusText = "正在发现认证服务…"
         publishDevices(force: true)
         p.delegate = self
-        p.discoverServices(nil)
+        // 安全边界：先只发现认证服务。STATE=authorized 之前不发现、更不启用
+        // 配置、屏幕、音频和 OTA 等业务特征值。
+        if let link = links[p.identifier] {
+            beginAuthenticationSetup(link, source: "did-connect")
+        }
     }
 
     func centralManager(_ c: CBCentralManager, didFailToConnect p: CBPeripheral, error: Error?) {
-        log("连接失败: \(String(describing: error)),将自动重试")
-        scheduleReconnect(to: p)
+        authSetupTokens.removeValue(forKey: p.identifier)
+        let wasResettingSystemAttempt = reconnectRecoveryTokens.removeValue(
+            forKey: p.identifier) != nil
+        links.removeValue(forKey: p.identifier)
+        discovered[p.identifier]?.connected = false
+        discovered[p.identifier]?.authState = "disconnected"
+        discovered[p.identifier]?.authStatusText = "连接失败"
+        publishDevices(force: true)
+        let automatic = authorizedPeripheralIDs.contains(p.identifier) &&
+            !deniedIDs.contains(p.identifier) &&
+            !userDisconnectedIDs.contains(p.identifier)
+        log("连接失败\(wasResettingSystemAttempt ? "(旧自动连接已取消)" : ""): " +
+            "\(String(describing: error))\(automatic ? "，将自动重试" : "")")
+        if automatic { scheduleReconnect(to: p) }
     }
 
-    func centralManager(_ c: CBCentralManager, didDisconnectPeripheral p: CBPeripheral, error: Error?) {
+    private func handleDisconnect(_ p: CBPeripheral, error: Error?, systemReconnecting: Bool) {
+        authSetupTokens.removeValue(forKey: p.identifier)
+        let wasResettingSystemAttempt = reconnectRecoveryTokens.removeValue(
+            forKey: p.identifier) != nil
         let byUser = userDisconnectedIDs.contains(p.identifier)
+        let denied = deniedIDs.contains(p.identifier)
+        let canRetry = authorizedPeripheralIDs.contains(p.identifier) && !byUser && !denied
+        let explicitBackoff = (reconnectNotBefore[p.identifier] ?? .distantPast) > Date()
         log(byUser ? "设备已按用户要求断开"
-                   : "设备已断开连接: \(String(describing: error)),将自动重连")
+                   : "设备已断开连接: \(String(describing: error))\(canRetry ? "，将自动重连" : "")")
         // ⚠ 只拆**这一台**。特征值都挂在它自己的 link 上,删掉 link 就清干净
         // 了;顺手清别人的会让另一台无声失联 —— 还连着,但什么都收不到。
         links.removeValue(forKey: p.identifier)
+        discovered[p.identifier]?.connected = false
+        discovered[p.identifier]?.authorized = false
+        discovered[p.identifier]?.authState = denied ? "denied" : "disconnected"
+        if !denied { discovered[p.identifier]?.authStatusText = "连接已断开" }
+        if !systemReconnecting && !wasResettingSystemAttempt && !byUser && !denied {
+            // 自然离开覆盖范围时也给其它可信端一个接管窗口。否则旧 Mac 在
+            // Passport 回到边缘信号后 2 秒就抢回，手机很难完成流转。
+            let naturalBackoff = Date().addingTimeInterval(10)
+            reconnectNotBefore[p.identifier] = max(
+                reconnectNotBefore[p.identifier] ?? .distantPast, naturalBackoff)
+        }
         // ⚠ 不做"焦点顺位接管"。以前 A 掉线会把界面凭空切到 B,而且是用
         // onLinkChange(true, …) 报出去的 —— 把一次焦点变化说成一次连接建立。
         // 界面正看着这一台的话,让它显示"这台断了",不要偷偷换一台给用户看。
@@ -654,8 +1323,35 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         publishWalkieLinkState(for: p.identifier)
         onLinkChange?(p.identifier, false, nil)
         onDeviceDetached?(p.identifier)
-        // 用户主动断开的话就停在这里,等他点"重新扫描"。
-        if !byUser { scheduleReconnect(to: p) }
+        if systemReconnecting {
+            // AutoReconnect starts immediately. Explicit handoff/yield cooldowns still
+            // win: cancel the system attempt and resume through our delayed policy.
+            if !canRetry || explicitBackoff {
+                central.cancelPeripheralConnection(p)
+                if canRetry { scheduleReconnect(to: p) }
+            } else {
+                // Let iOS reconnect while the app is suspended, but bound the wait when
+                // we are running. If CoreBluetooth gets stuck in `.connecting`, replace
+                // that attempt with a fresh AutoReconnect-enabled request.
+                armFreshSystemReconnectWatchdog(p)
+            }
+        } else if canRetry {
+            scheduleReconnect(to: p)
+        }
+    }
+
+    func centralManager(_ c: CBCentralManager, didDisconnectPeripheral p: CBPeripheral, error: Error?) {
+        handleDisconnect(p, error: error, systemReconnecting: false)
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    func centralManager(_ central: CBCentralManager,
+                        didDisconnectPeripheral p: CBPeripheral,
+                        timestamp: CFAbsoluteTime,
+                        isReconnecting: Bool,
+                        error: Error?) {
+        _ = timestamp
+        handleDisconnect(p, error: error, systemReconnecting: isReconnecting)
     }
 
     func centralManager(_ central: CBCentralManager, willRestoreState dict: [String : Any]) {
@@ -664,14 +1360,12 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         // 回调会被逐个丢掉)。
         guard let restored = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] else { return }
         for p in restored {
-            links[p.identifier] = links[p.identifier] ?? DeviceLink(peripheral: p)
+            // CoreBluetooth 可能恢复上次被系统中断的连接。仍然必须重新走 HELLO
+            // 和 bond 验证，不能把 restored 当成已授权。
+            knownPeripherals[p.identifier] = p
             p.delegate = self
-            if p.state == .connected {
-                p.discoverServices(nil)
-            } else {
-                central.connect(p, options: nil)
-            }
-            log("恢复 BLE 外设状态:\(p.identifier)")
+            recoverPeripheral(p, source: "state-restoration")
+            log("恢复 BLE 外设状态:\(p.identifier) state=\(p.state.rawValue)")
         }
         if displayedID == nil { displayedID = restored.first?.identifier }
     }
@@ -703,18 +1397,45 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             // 已经在 links 里了。那一刀的代价是:想找一台新设备,就把另外两台
             // 正在跑的固件安装和通话一起掐了。
             self.userDisconnectedIDs.remove(id)
+            self.deniedIDs.remove(id)
+            self.reconnectNotBefore.removeValue(forKey: id)
             self.startScanIfNeeded()
         }
     }
 
     func peripheral(_ p: CBPeripheral, didDiscoverServices error: Error?) {
+        guard let link = links[p.identifier] else { return }
         if let error = error {
             log("发现服务出错: \(error)")
+            link.auth.state = "denied"
+            link.auth.reason = "service_discovery_failed"
+            publishAuth(link)
+            central.cancelPeripheralConnection(p)
             return
         }
-        for svc in p.services ?? [] {
+        let services = p.services ?? []
+        if services.contains(where: { $0.uuid == Self.authServiceUUID }) {
+            // The restored GATT transport is alive. From here the normal
+            // characteristic/HELLO flow and firmware timeout own authentication.
+            authSetupTokens.removeValue(forKey: p.identifier)
+        }
+        if !link.authorized && !services.contains(where: { $0.uuid == Self.authServiceUUID }) {
+            link.auth.state = "denied"
+            link.auth.reason = "auth_service_missing"
+            deniedIDs.insert(link.id)
+            publishAuth(link)
+            log("[auth] 设备固件不含认证服务，请先通过 USB 刷入新版完整固件")
+            central.cancelPeripheralConnection(p)
+            return
+        }
+        for svc in services {
             log("发现 service: \(svc.uuid)")
-            p.discoverCharacteristics(nil, for: svc)
+            if svc.uuid == Self.authServiceUUID {
+                p.discoverCharacteristics([Self.authHelloCharUUID, Self.authStateCharUUID,
+                                           Self.authCommandCharUUID], for: svc)
+            } else if link.authorized {
+                p.discoverCharacteristics(nil, for: svc)
+            }
         }
     }
 
@@ -731,6 +1452,25 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         }
         for chr in svc.characteristics ?? [] {
             log("发现 characteristic: \(chr.uuid) properties=\(chr.properties)")
+            if chr.uuid == Self.authHelloCharUUID {
+                link.authHelloChar = chr
+                sendHello(on: link)
+                continue
+            } else if chr.uuid == Self.authStateCharUUID {
+                link.authStateChar = chr
+                link.authRxBuffer = ""
+                log("[auth] 发现 STATE characteristic，订阅 notify...")
+                p.setNotifyValue(true, for: chr)
+                continue
+            } else if chr.uuid == Self.authCommandCharUUID {
+                link.authCommandChar = chr
+                requestTrustedList(on: link)
+                continue
+            }
+
+            // 即使 CoreBluetooth 返回了缓存中的旧业务服务，也必须在 Passport
+            // 明确回 STATE=authorized 之前忽略，避免未认证链路获得任何能力。
+            guard link.authorized else { continue }
             if chr.uuid == Self.audioCharUUID {
                 link.audioChar = chr
                 log("发现 AUDIO characteristic,订阅 notify...")
@@ -794,7 +1534,8 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     func peripheral(_ p: CBPeripheral, didUpdateNotificationStateFor chr: CBCharacteristic, error: Error?) {
-        guard chr.uuid == Self.audioCharUUID
+        guard chr.uuid == Self.authStateCharUUID
+              || chr.uuid == Self.audioCharUUID
               || chr.uuid == Self.appStoreCmdCharUUID
               || chr.uuid == Self.remoteEventCharUUID
               || chr.uuid == Self.deviceStatusCharUUID
@@ -807,6 +1548,13 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             return
         }
         log("\(chr.uuid) 特征值订阅状态: isNotifying=\(chr.isNotifying)")
+        if chr.uuid == Self.authStateCharUUID {
+            guard let link = links[p.identifier], chr.isNotifying else { return }
+            // 必须等 STATE 订阅生效后再 HELLO；否则快速配对的 authorized 通知
+            // 可能发生在订阅之前，伴侣会永远停在“正在认证”。
+            sendHello(on: link)
+            return
+        }
         // 同样写进这一台自己的 link:两台的订阅回调交错到达,写进 active
         // 那一套会让先就绪的把后一台的状态覆盖掉。
         if chr.uuid == Self.walkieUplinkCharUUID {
@@ -821,6 +1569,15 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         // 通知来自哪一台是有意义的:状态缓冲按台各存一份,按键/说话还要
         // 决定把焦点交给谁。没有 link 说明这一台刚被拆掉,丢弃即可。
         guard let link = links[p.identifier] else { return }
+        if chr.uuid == Self.authStateCharUUID {
+            if let error {
+                log("[auth] STATE 读取失败: \(error)")
+                return
+            }
+            guard let value = chr.value else { return }
+            consumeAuthData(value, on: link)
+            return
+        }
         if chr.uuid == Self.audioCharUUID {
             if let error = error {
                 log("AUDIO 特征值更新出错: \(error)")
@@ -869,6 +1626,11 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             if link.statusRxBuffer.utf8.count > 4096 {
                 log("设备状态缓冲超长,丢弃")
                 link.statusRxBuffer = ""
+            }
+            for (key, value) in pairs where key != "wifi.ap" &&
+                                              key != "wifi.ap.begin" &&
+                                              key != "wifi.ap.end" {
+                link.cachedDeviceStatus[key] = value
             }
             // ⚠ 每台的状态都要上报。以前这里按"活跃那台"过滤,而设备只在
             // 状态**变化**时通知一次 —— 过滤掉就永久丢了,那台的配置页会一直
@@ -924,6 +1686,18 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         // 而且只在两条路径恰好撞上时才出现,极难复现。按 UUID 精确分派之后
         // 这类串台在结构上就不可能发生了。
         switch chr.uuid {
+        case Self.authHelloCharUUID:
+            if let error {
+                log("[auth] HELLO 写入失败: \(error)")
+                links[p.identifier]?.auth.state = "denied"
+                links[p.identifier]?.auth.reason = "hello_write_failed"
+                if let link = links[p.identifier] { publishAuth(link) }
+                central.cancelPeripheralConnection(p)
+            }
+
+        case Self.authCommandCharUUID:
+            if let error { log("[auth] COMMAND 写入失败: \(error)") }
+
         case Self.appStoreDataCharUUID:
             // 推进的是**这一台自己**那条队列。目录是广播的,共用一条的话
             // 先回调的那台会吃掉别人的分片 —— 编译通过,表现是另一台的
@@ -1111,9 +1885,9 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         }
     }
 
-    /// 推一屏内容给设备。设备靠结尾的换行判断收齐,所以拆包发送时不能在
-    /// 中间截断 —— 这里整段一次写,超过 MTU 的部分由 CoreBluetooth 自己分片,
-    /// 设备侧会攒到看见换行为止。
+    /// 推一屏内容给设备。设备靠一次 GATT 写入结尾的换行判断收齐；旧固件
+    /// 会把任何以换行结尾的中间写入误当成完整屏幕，所以只有最后一片可以
+    /// 以换行结尾。
     /// 推一屏内容给**指定的那一台**。
     ///
     /// 这里曾经按"谁在远程应用里"扇出给多台,那是"一个会话、几面镜子"时代
@@ -1124,25 +1898,17 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             guard let self = self, let link = self.links[device],
                   let chr = link.remoteScreenChar else { return }
             let p = link.peripheral
-            guard let data = text.data(using: .utf8) else { return }
-            // 设备接收缓冲 1KB;超了它会整屏丢弃,与其那样不如这里就截断到
-            // 最后一个完整行,至少还能显示前半屏。
-            var payload = data
-            if payload.count > 1000 {
-                let head = payload.prefix(1000)
-                if let lastNewline = head.lastIndex(of: 0x0A) {
-                    payload = Data(head[...lastNewline])
-                } else {
-                    payload = Data(head)
-                }
-                log("远程界面:内容过长已截断到 \(payload.count) 字节")
-            }
             let maxLen = min(p.maximumWriteValueLength(for: .withResponse), 500)
-            var offset = 0
-            while offset < payload.count {
-                let end = min(offset + maxLen, payload.count)
-                p.writeValue(payload.subdata(in: offset..<end), for: chr, type: .withResponse)
-                offset = end
+            guard let chunks = RemoteScreenChunker.chunks(text, chunkLimit: maxLen) else {
+                log("远程界面:当前 MTU 无法安全拆分 UTF-8 内容")
+                return
+            }
+            let sentBytes = chunks.reduce(0) { $0 + $1.count }
+            if sentBytes < text.utf8.count {
+                log("远程界面:内容过长已截断到 \(sentBytes) 字节")
+            }
+            for chunk in chunks {
+                p.writeValue(chunk, for: chr, type: .withResponse)
             }
         }
     }
@@ -1244,10 +2010,20 @@ final class BLERelay: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
     /// 这条链路够用了就通知上层为它建会话。只报一次。
     private func announceAttachedIfReady(_ link: DeviceLink) {
-        guard !link.attachAnnounced, link.configReady, link.appStoreReady else { return }
+        guard link.authorized, !link.attachAnnounced, link.configReady,
+              link.appStoreReady else { return }
         link.attachAnnounced = true
         log("设备会话就绪:\(link.peripheral.name ?? link.id.uuidString)")
         onDeviceAttached?(link.id)
+        // onDeviceAttached / onDeviceStatus 都从同一条 bleQueue 依次投到主线程，
+        // 因而先建会话、后回放状态。尤其保证只上报一次的 firmware.version
+        // 不会因为早于 attach 到达而在 AppCore 里被丢掉。
+        if !link.cachedDeviceStatus.isEmpty {
+            let snapshot = link.cachedDeviceStatus.keys.sorted().compactMap { key in
+                link.cachedDeviceStatus[key].map { (key, $0) }
+            }
+            onDeviceStatus?(link.id, snapshot)
+        }
     }
 
     /// Must only be called on bleQueue.

@@ -1,14 +1,17 @@
 import Foundation
+import Security
 
 final class MealClient {
-    private static let appName = "吃饭"
+    private static let appName = "字节餐厅"
 
     private struct Config: Decodable {
         let server: String
+        let authRequired: Bool?
     }
 
     private let queue = DispatchQueue(label: "com.folotoy.codexrelay.meal")
     private let defaults: UserDefaults
+    private let storeSharedToken: (String) -> Void
 
     private var session: URLSession?
     private var socket: URLSessionWebSocketTask?
@@ -16,6 +19,8 @@ final class MealClient {
     private var generation: UInt64 = 0
     private var snapshot = MealSnapshot()
     private var serverAddress: String
+    private var sharedToken: String
+    private var authRequired = false
     private var clientID: String
 
     /// ⚠ 多播,不是单槽。
@@ -36,10 +41,26 @@ final class MealClient {
     private func onSnapshotFanout(_ v: MealSnapshot) { snapshotObservers.forEach { $0(v) } }
     private func onReminderFanout(_ v: MealReminder) { reminderObservers.forEach { $0(v) } }
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard,
+         loadSharedToken: () -> String = { MealClient.loadToken() },
+         storeSharedToken: @escaping (String) -> Void = { MealClient.storeToken($0) }) {
         self.defaults = defaults
+        self.storeSharedToken = storeSharedToken
         let fallbackServer = Self.configuredServer(defaults: defaults)
-        serverAddress = defaults.string(forKey: "meal.server") ?? fallbackServer
+        authRequired = AppConfigStore.load(Config.self, for: Self.configID)?.authRequired == true
+        let savedServer = defaults.string(forKey: "meal.server")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        serverAddress = savedServer.flatMap { $0.isEmpty ? nil : $0 } ?? fallbackServer
+        sharedToken = loadSharedToken()
+        // 旧版本如果曾把口令写入偏好设置，启动时把它搬进钥匙串并删除明文。
+        if let legacy = defaults.string(forKey: "meal.token"), !legacy.isEmpty {
+            if sharedToken.isEmpty {
+                sharedToken = legacy
+                storeSharedToken(legacy)
+            }
+            defaults.removeObject(forKey: "meal.token")
+            log("[meal] 已把旧的明文口令迁进钥匙串并从 UserDefaults 删除")
+        }
         if let stored = defaults.string(forKey: "meal.client-id"), !stored.isEmpty {
             clientID = stored
         } else {
@@ -53,8 +74,8 @@ final class MealClient {
         snapshot.status = "尚未启用"
     }
 
-    func currentConfiguration() -> String {
-        queue.sync { serverAddress }
+    func currentConfiguration() -> (server: String, token: String) {
+        queue.sync { (serverAddress, sharedToken) }
     }
 
     /// 测试用:等自己那条串行队列上已排队的活干完。
@@ -65,10 +86,12 @@ final class MealClient {
         queue.sync { snapshot }
     }
 
-    func configure(server: String) {
+    func configure(server: String, token: String) {
         queue.async {
             self.serverAddress = server.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.sharedToken = token
             self.defaults.set(self.serverAddress, forKey: "meal.server")
+            self.storeSharedToken(self.sharedToken)
             self.disconnectLocked(reconnect: false)
             if self.snapshot.installed {
                 self.connectLocked()
@@ -123,8 +146,14 @@ final class MealClient {
 
     private func connectLocked() {
         guard snapshot.installed, socket == nil else { return }
+        if authRequired && sharedToken.isEmpty {
+            snapshot.status = "请在设置中填写共享口令"
+            publish()
+            return
+        }
         guard let url = Self.mealEndpoint(from: serverAddress) else {
-            snapshot.status = "服务地址无效"
+            snapshot.status = serverAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? "请在设置中填写服务地址" : "服务地址无效"
             publish()
             return
         }
@@ -141,7 +170,8 @@ final class MealClient {
         socket.resume()
         receiveNext(socket, generation: myGeneration)
         schedulePing(socket, generation: myGeneration)
-        send(MealClientMessage(type: "join", clientId: clientID, installed: true))
+        send(MealClientMessage(type: "join", clientId: clientID, installed: true,
+                               token: sharedToken.isEmpty ? nil : sharedToken))
     }
 
     private func receiveNext(_ task: URLSessionWebSocketTask, generation: UInt64) {
@@ -247,8 +277,10 @@ final class MealClient {
     }
 
     static func mealEndpoint(from raw: String) -> URL? {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        var trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
+        let suppliedScheme = trimmed.contains("://")
+        if !suppliedScheme { trimmed = "ws://" + trimmed }
         guard var components = URLComponents(string: trimmed) else { return nil }
         switch components.scheme?.lowercased() {
         case "http": components.scheme = "ws"
@@ -256,6 +288,8 @@ final class MealClient {
         case "ws", "wss": break
         default: return nil
         }
+        guard let host = components.host, !host.isEmpty else { return nil }
+        if !suppliedScheme && components.port == nil { components.port = 8788 }
         components.path = "/v1/meals/ws"
         components.query = nil
         components.fragment = nil
@@ -264,6 +298,45 @@ final class MealClient {
 
     /// 配置文件名。跟应用 id 一致。
     static let configID = "meal"
+
+    // MARK: 共享口令
+
+    // 口令只进系统钥匙串。钥匙串不可用时保留在本次进程内，不回退到
+    // UserDefaults，也不把口令内容写进日志。
+    private static let tokenService = "com.folotoy.codexrelay.meal"
+    private static let tokenAccount = "shared-token"
+
+    private static func storeToken(_ value: String) {
+        let base: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: tokenService,
+            kSecAttrAccount as String: tokenAccount,
+        ]
+        SecItemDelete(base as CFDictionary)
+        guard !value.isEmpty, let data = value.data(using: .utf8) else { return }
+        var add = base
+        add[kSecValueData as String] = data
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        let status = SecItemAdd(add as CFDictionary, nil)
+        if status != errSecSuccess {
+            log("[meal] 口令写入钥匙串失败 status=\(status)")
+        }
+    }
+
+    private static func loadToken() -> String {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: tokenService,
+            kSecAttrAccount as String: tokenAccount,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data,
+              let token = String(data: data, encoding: .utf8) else { return "" }
+        return token
+    }
 
     private static func configuredServer(defaults: UserDefaults) -> String {
         if let config = AppConfigStore.load(Config.self, for: configID),

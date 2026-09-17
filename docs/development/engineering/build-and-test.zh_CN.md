@@ -31,6 +31,15 @@ target 或已跟踪 defaults 时，先保留有意的本地设置，再运行
 
 固件门禁使用全新的临时构建目录，并从仓库 `sdkconfig.defaults` 生成隔离的 `sdkconfig`。它不会读取或覆盖开发者根目录的 `sdkconfig`，只把验证通过的合并镜像复制到 `build/FoloToy-AI-Passport-full.bin`。门禁同时强制检查[小程序 BLE 兼容契约](ble-recovery-compatibility.zh_CN.md)：保护分区地址、应用大小、分区表 MD5、保护区数据不入包，以及 Recovery bootloader hook。
 
+根目录 `VERSION` 是固件版本的唯一来源。普通本地与分支构建会把
+`<版本>-dev+g<短 SHA>` 写入 `esp_app_desc_t`；工作区有改动时再追加
+`.dirty`。发布构建设置 `FOLO_FIRMWARE_RELEASE=1`，写入纯版本号。验证会同时
+产出固定别名 `FoloToy-AI-Passport-full.bin` 与
+`FoloToy-AI-Passport-v<解析后版本>-full.bin`，随后根据复制进伴侣端目录的实际
+应用镜像，自动更新 `AppCatalog/catalog.json` 中的版本、字节数与 SHA-256。
+macOS、脚本式 iOS 和生成的 Xcode 工程都会在打包前校验固件与目录元数据；
+因此全新检出的仓库需要先构建一次固件，再构建带固件升级能力的伴侣 App。
+
 当前基线含一个可独立运行的纯逻辑测试：
 
 ```bash

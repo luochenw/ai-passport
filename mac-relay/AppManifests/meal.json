@@ -1,21 +1,21 @@
 {
   "id": "meal",
-  "name": "吃饭",
+  "name": "字节餐厅",
   "detail": "本周菜单与楼层推荐",
   "icon": "",
   "capability": "meal",
   "settings": "meal",
 
   "keys": {
-    "up":   { "click": "prevDay", "hold": "prevDay" },
-    "down": { "click": "nextDay", "hold": "nextDay" },
+    "up":   { "click": "prevPage", "hold": "prevDay" },
+    "down": { "click": "nextPage", "hold": "nextDay" },
     "ok":   { "click": "togglePeriod" }
   },
 
   "screens": [
     {
-      "title": "{{weekday|default:吃饭}} {{period}}",
-      "footer": "{{multiDay|pick:上下换天  确定午晚/仅今日菜单  确定午晚}}",
+      "title": "{{weekday|default:字节餐厅}} {{dateLabel}} {{period}} {{pageStatus}}",
+      "footer": "单击翻页 长按换天 确定午晚",
       "rows": [
         { "when": { "cond": "!connected",
                     "then": [ { "text": "{{status}}" } ],
@@ -28,12 +28,12 @@
               { "text": "当日菜单未归档" },
               { "text": "{{date}}" }
             ], "else": [
-              { "text": "推荐  {{floor}}" },
-              { "each": { "path": "recommendation", "limit": 2,
-                          "body": [ { "text": "{{item}}" } ] } },
-              { "spacer": true },
-              { "each": { "path": "floors", "limit": 5,
-                          "body": [ { "text": "{{item}}" } ] } }
+              { "when": { "cond": "!hasPeriodMenu",
+                          "then": [ { "text": "本餐暂无菜单" } ],
+                          "else": [
+                { "each": { "path": "menuRows", "limit": 9,
+                            "body": [ { "text": "{{item}}", "style": "{{item.style}}" } ] } }
+              ] } }
             ] } }
           ] } }
         ] } }

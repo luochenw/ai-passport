@@ -62,7 +62,17 @@ enum ManifestStore {
             let url = dir.appendingPathComponent("\(id).json")
             guard let data = FileManager.default.contents(atPath: url.path) else { continue }
             do {
-                let manifest = try AppManifest.decode(data)
+                var manifest = try AppManifest.decode(data)
+                // A previously downloaded manifest can outlive an app update.
+                // Keep product renames authoritative even while that old cache
+                // remains the selected source.
+                if manifest.id == "meal", manifest.name == "吃饭" {
+                    manifest.name = "字节餐厅"
+                    for index in manifest.screens.indices {
+                        manifest.screens[index].title = manifest.screens[index].title
+                            .replacingOccurrences(of: "default:吃饭", with: "default:字节餐厅")
+                    }
+                }
                 warnIfShadowingSource(id: id, winner: dir, data: data)
                 return manifest
             } catch {

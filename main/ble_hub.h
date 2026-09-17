@@ -60,6 +60,11 @@ uint16_t ble_hub_conn_handle(void);   // 未连接时返回 BLE_HS_CONN_HANDLE_N
 int ble_hub_indicate(uint16_t val_handle, const void *data, int len);
 int ble_hub_notify(uint16_t val_handle, const void *data, int len);
 
+// True only after LE Secure Connections completed and the peer identity is in
+// Passport's trusted-companion store. Feature GATT write callbacks must gate
+// on this; the authentication service itself deliberately remains reachable.
+bool ble_hub_is_authorized_conn(uint16_t conn_handle);
+
 // 请求缩短/恢复连接间隔。传大块数据(固件安装)前打开,传完关掉 ——
 // 常开会明显增加空闲功耗,而这个设备是电池供电的。
 void ble_hub_request_fast_interval(bool fast);

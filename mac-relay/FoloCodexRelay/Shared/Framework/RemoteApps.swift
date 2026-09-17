@@ -21,6 +21,23 @@ import SwiftUI
 /// 一屏的内容。用 builder 而不是让应用直接拼协议字符串 —— 拼字符串很容易漏
 /// 掉换行或写错前缀,而那类错误在设备上表现为"某一行莫名其妙不显示"。
 struct Screen {
+    /// 正文行的视觉层级。样式是附加元数据：正文仍以既有的 `L` 行发送，
+    /// 因此旧固件只会按普通正文显示，不会因为不认识颜色而丢掉内容。
+    enum RowStyle: String {
+        case body
+        case accent
+        case secondary
+
+        init(manifestValue: String) {
+            self = RowStyle(rawValue: manifestValue) ?? .body
+        }
+    }
+
+    private struct EncodedRow {
+        let line: String
+        let style: RowStyle
+    }
+
     var title: String = ""
     var footer: String = ""
 
@@ -35,25 +52,26 @@ struct Screen {
     /// immediately instead of waiting for the long-press threshold.
     var walkie: Bool = false
 
-    private var rows: [String] = []
+    private var rows: [EncodedRow] = []
 
-    mutating func text(_ s: String) {
+    mutating func text(_ s: String, style: RowStyle = .body) {
         // 每一行也压成一行宽度。设备侧虽然有兜底(限宽 + 固定高度 + 省略号),
         // 但让它去截意味着截在哪儿这边不知道;在这里截,末尾的省略号位置是
         // 确定的,而且两端对"一行能放多少"的判断是同一份。
-        rows.append("L" + DeviceText.fitOneLine(sanitize(s)))
+        rows.append(EncodedRow(
+            line: "L" + DeviceText.fitOneLine(sanitize(s)), style: style))
     }
 
     /// 进度条。percent 会被夹到 0...100 —— 越界值在设备上会画出超出边框的
     /// 填充条,不如在这里就夹住。
     mutating func bar(_ label: String, percent: Double) {
         let p = Int(max(0, min(100, percent)).rounded())
-        rows.append("B\(p)|" + sanitize(label))
+        rows.append(EncodedRow(line: "B\(p)|" + sanitize(label), style: .body))
     }
 
     /// 空行,用来分组。
     mutating func spacer() {
-        rows.append("L")
+        rows.append(EncodedRow(line: "L", style: .body))
     }
 
     /// 协议是行式的,内容里混进换行会被解析成新的一行、错位显示。
@@ -71,7 +89,14 @@ struct Screen {
         if !title.isEmpty {
             out += "T" + DeviceText.fitOneLine(title.replacingOccurrences(of: "\n", with: " ")) + "\n"
         }
-        for r in rows       { out += r + "\n" }
+        for (index, row) in rows.enumerated() {
+            out += row.line + "\n"
+            // S 是对既有正文行的可选修饰。老固件会忽略未知的 S 行，但前面的
+            // L/B 内容仍完整可见；新固件则按行号应用颜色。
+            if row.style != .body {
+                out += "S\(index)|\(row.style.rawValue)\n"
+            }
+        }
         if !footer.isEmpty {
             out += "H" + DeviceText.fitOneLine(footer.replacingOccurrences(of: "\n", with: " ")) + "\n"
         }
@@ -198,7 +223,9 @@ enum DeviceText {
     /// 屏幕上特别难读,而代码和路径又恰恰是最常出现的内容。
     ///
     /// 超过 limit 行的部分会被丢掉,调用方要自己保证内容分页时就已经放得下。
-    static func wrap(_ text: String, limit: Int) -> [String] {
+    static func wrap(_ text: String, limit: Int,
+                     widthBudget: Int = DeviceText.rowBudget) -> [String] {
+        let budget = max(1, widthBudget)
         var out: [String] = []
         for rawPara in text.split(separator: "\n", omittingEmptySubsequences: false) {
             if out.count >= limit { return out }
@@ -211,7 +238,7 @@ enum DeviceText {
 
             for ch in para {
                 let cw = width(ch)
-                if w + cw > rowBudget && !line.isEmpty {
+                if w + cw > budget && !line.isEmpty {
                     var head = line
                     var rest: [Character] = []
                     // 词边界离行尾太远就不用了 —— 那样会在行尾留下一大块空白,
@@ -451,6 +478,26 @@ final class RemoteAppHost {
             ?? defaults.stringArray(forKey: Self.legacyInstalledKey) ?? []
         self.iconOverrides = (defaults.dictionary(forKey: iconsKey) as? [String: String])
             ?? (defaults.dictionary(forKey: Self.legacyIconsKey) as? [String: String]) ?? [:]
+        // Preserve installed state and icon choices across user-visible app renames.
+        let renamedApps = ["吃饭": "字节餐厅"]
+        var migrated = false
+        self.installed = self.installed.map { old in
+            guard let new = renamedApps[old] else { return old }
+            migrated = true
+            return new
+        }
+        for (old, new) in renamedApps {
+            guard self.iconOverrides[new] == nil,
+                  let icon = self.iconOverrides.removeValue(forKey: old) else { continue }
+            self.iconOverrides[new] = icon
+            migrated = true
+        }
+        if migrated {
+            var seen = Set<String>()
+            self.installed = self.installed.filter { seen.insert($0).inserted }
+            defaults.set(self.installed, forKey: installedKey)
+            defaults.set(self.iconOverrides, forKey: iconsKey)
+        }
         if enableDebugChannel { pollDebugTrigger() }
     }
 
@@ -687,22 +734,63 @@ final class RemoteAppHost {
     func openApp(_ index: UInt8) {
         queue.async {
             self.current?.setActive(false)
+            // 先清掉上一条路由，再解释这次 OPEN。尤其不能让越界下标沿用
+            // inStore=true：设备的清单刚因卸载缩短时，旧下标可能短暂越界；
+            // 旧实现会在这里 return，紧接着 ACTIVE 又把上一次“应用商店 / 已经
+            // 全部安装”推回来，看起来像所有 App 都被错误地打开成商店。
+            self.current = nil
+            self.inStore = false
             if index == 0xFE {
                 self.inStore = true
-                self.current = nil
                 self.storeSelection = 0
             } else {
                 let list = self.installedApps
                 guard Int(index) < list.count else {
                     log("[remote] 首屏下标越界: \(index),清单可能不同步")
+                    self.deviceActive = true
+                    self.pushLauncherChangedNotice()
+                    self.pushManifest()
                     return
                 }
-                self.inStore = false
                 self.current = list[Int(index)]
                 self.current?.setActive(true)
             }
             self.deviceActive = true
             self.push()
+        }
+    }
+
+    /// OPEN 下标与最新清单对不上时覆盖设备保留的旧远程屏。设备端马上会收到
+    /// 重推的 MANIFEST；用户长按确定回首屏后看到的就是同一份最新列表。
+    private func pushLauncherChangedNotice() {
+        var s = Screen()
+        s.title = "应用列表已更新"
+        s.text("请返回首屏重新选择")
+        s.footer = "长按确定返回"
+        let text = s.encode()
+        log("[remote] 首屏下标失效，提示返回最新列表")
+        send(text)
+    }
+
+    /// Passport 首屏长按已安装应用。下标以刚推给这台设备的 installedApps
+    /// 顺序解释；真正删除后复用 applyInstalled() 回推 MANIFEST，让设备缓存
+    /// 与 companion 的持久状态始终由同一条路径更新。
+    func uninstallApp(at index: UInt8) {
+        queue.async {
+            let list = self.installedApps
+            guard Int(index) < list.count else {
+                log("[remote] 卸载下标越界: \(index),清单可能不同步")
+                self.pushManifest()
+                return
+            }
+            let app = list[Int(index)]
+            self.applyInstalled(app.name, false)
+            if self.current === app {
+                app.setActive(false)
+                self.current = nil
+                self.deviceActive = false
+            }
+            log("[remote] 已按 Passport 请求卸载「\(app.name)」")
         }
     }
 

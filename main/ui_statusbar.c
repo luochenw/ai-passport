@@ -5,6 +5,7 @@
 #include "ble_hub.h"
 #include "device_config.h"
 #include "ui_pixel.h"
+#include "ui_statusbar_model.h"
 #include "wifi_mgr.h"
 
 #include "driver/usb_serial_jtag.h"
@@ -224,12 +225,13 @@ static void refresh(lv_timer_t *timer)
     bool ble_conn = ble_hub_is_connected();
     set_item(s_ble, s_last_ble, sizeof(s_last_ble),
              item_on("ble"), LV_SYMBOL_BLUETOOTH,
-             ble_conn ? UI_ACCENT : UI_MUTED);
+             ble_conn ? UI_STATUSBAR_BLE_CONNECTED_COLOR : UI_MUTED);
 
     // ---- Wi-Fi ----
+    bool wifi_conn = wifi_mgr_is_connected();
     set_item(s_wifi, s_last_wifi, sizeof(s_last_wifi),
              item_on("wifi"), LV_SYMBOL_WIFI,
-             wifi_mgr_is_connected() ? UI_SAGE : UI_MUTED);
+             wifi_conn ? UI_STATUSBAR_WIFI_CONNECTED_COLOR : UI_MUTED);
 
     layout_left();
 

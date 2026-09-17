@@ -65,6 +65,7 @@ def check_required_files(errors: list[str]) -> None:
         ".github/SECURITY.md",
         ".github/SUPPORT.md",
         "dependencies.lock",
+        "VERSION",
         "sdkconfig.defaults",
         "partitions.csv",
         ".github/PULL_REQUEST_TEMPLATE.md",

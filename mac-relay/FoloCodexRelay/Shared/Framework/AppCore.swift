@@ -93,6 +93,9 @@ final class AppCore {
         relay.onDeviceStatus = { [weak self] id, pairs in
             DispatchQueue.main.async { self?.session(id)?.handleDeviceStatus(pairs) }
         }
+        relay.onAuthState = { [weak self] id, snapshot in
+            DispatchQueue.main.async { self?.session(id)?.handleAuthSnapshot(snapshot) }
+        }
         relay.onLinkChange = { [weak self] id, connected, _ in
             DispatchQueue.main.async {
                 guard let session = self?.router.sessions[id] else { return }
